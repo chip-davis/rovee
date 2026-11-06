@@ -9,6 +9,7 @@ pub struct AppDevice {
     pub live: Option<Device>,
     pub on: bool,
     pub marked: bool,
+    pub kelvin: Option<u32>,
 }
 
 impl AppDevice {
@@ -18,6 +19,7 @@ impl AppDevice {
             live: None,
             on: false,
             marked: false,
+            kelvin: None,
         }
     }
 
@@ -40,17 +42,17 @@ pub async fn merge(backend: &LocalBackend, devices: &mut Vec<AppDevice>, found: 
                 live: Some(f),
                 on: false,
                 marked: false,
+                kelvin: None,
             }),
         }
     }
 
     for d in devices.iter_mut() {
-        if let Some(live) = &d.live {
-            d.on = backend
-                .get_state(&live.id)
-                .await
-                .map(|s| s.on)
-                .unwrap_or(false);
+        if let Some(live) = &d.live
+            && let Ok(state) = backend.get_state(&live.id).await
+        {
+            d.on = state.on;
+            d.kelvin = state.color_temp_kelvin;
         }
     }
 }

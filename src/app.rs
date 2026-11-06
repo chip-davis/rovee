@@ -3,11 +3,17 @@ use std::time::Duration;
 
 use color_eyre::Result;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use govee::backend::GoveeBackend;
 use govee::backend::local::LocalBackend;
-use ratatui::{DefaultTerminal, layout::Position, style::Color as TuiColor, widgets::ListState};
+use ratatui::{
+    DefaultTerminal,
+    layout::{Position, Rect},
+    style::Color as TuiColor,
+    widgets::ListState,
+};
 use tui_color_picker::RectState;
 
 use crate::devices::AppDevice;
@@ -18,10 +24,54 @@ use crate::ui;
 /// Favorites map to keys 1-9.
 pub const MAX_FAVORITES: usize = 9;
 
+pub const MIN_KELVIN: u32 = 2000;
+pub const MAX_KELVIN: u32 = 9000;
+const KELVIN_STEP: u32 = 100;
+const KELVIN_BIG_STEP: u32 = 500;
+const DEFAULT_KELVIN: u32 = 4000;
+
 pub enum Mode {
     Normal,
     Renaming(TextInput),
     ChangingColor(ColorPicker),
+    ChangingTemp(ColorTemp),
+}
+
+pub struct ColorTemp {
+    pub current_kelvin: u32,
+    pub bar: Rect,
+}
+
+impl ColorTemp {
+    pub fn kelvin_at(&self, column: u16, row: u16) -> Option<u32> {
+        if !self.bar.contains(Position::new(column, row)) {
+            return None;
+        }
+        Some(kelvin_for_offset(column - self.bar.x, self.bar.width))
+    }
+}
+
+pub fn kelvin_for_offset(offset: u16, width: u16) -> u32 {
+    if width <= 1 {
+        return MIN_KELVIN;
+    }
+    let span = MAX_KELVIN - MIN_KELVIN;
+    let raw = MIN_KELVIN + offset as u32 * span / (width as u32 - 1);
+    snap_kelvin(raw)
+}
+
+pub fn offset_for_kelvin(kelvin: u32, width: u16) -> u16 {
+    if width <= 1 {
+        return 0;
+    }
+    let k = kelvin.clamp(MIN_KELVIN, MAX_KELVIN) - MIN_KELVIN;
+    let span = MAX_KELVIN - MIN_KELVIN;
+    ((k * (width as u32 - 1) + span / 2) / span) as u16
+}
+
+fn snap_kelvin(kelvin: u32) -> u32 {
+    let snapped = (kelvin + KELVIN_STEP / 2) / KELVIN_STEP * KELVIN_STEP;
+    snapped.clamp(MIN_KELVIN, MAX_KELVIN)
 }
 
 pub struct ColorPicker {
@@ -83,22 +133,43 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
-        let Mode::ChangingColor(ref picker) = self.mode else {
-            return Ok(());
-        };
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            return Ok(());
-        }
+        match self.mode {
+            Mode::ChangingColor(ref picker) => {
+                if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                    return Ok(());
+                }
 
-        let click = Position::new(mouse.column, mouse.row);
-        if !picker.wheel.rect().contains(click) {
-            return Ok(());
-        }
+                let click = Position::new(mouse.column, mouse.row);
+                if !picker.wheel.rect().contains(click) {
+                    return Ok(());
+                }
 
-        let TuiColor::Rgb(r, g, b) = picker.wheel.color(mouse.column, mouse.row) else {
-            return Ok(());
-        };
-        self.apply_color((r, g, b)).await
+                let TuiColor::Rgb(r, g, b) = picker.wheel.color(mouse.column, mouse.row) else {
+                    return Ok(());
+                };
+                self.apply_color((r, g, b)).await
+            }
+
+            Mode::ChangingTemp(ref mut temp) => {
+                let pressed = matches!(
+                    mouse.kind,
+                    MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+                );
+                if !pressed {
+                    return Ok(());
+                }
+                let Some(kelvin) = temp.kelvin_at(mouse.column, mouse.row) else {
+                    return Ok(());
+                };
+                if kelvin == temp.current_kelvin {
+                    return Ok(());
+                }
+                temp.current_kelvin = kelvin;
+                self.apply_temp(kelvin).await
+            }
+
+            _ => Ok(()),
+        }
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -111,6 +182,7 @@ impl App {
                 KeyCode::Char('m') => self.toggle_mark(),
                 KeyCode::Char('r') => self.start_rename(),
                 KeyCode::Char('w') => self.start_color_picker(),
+                KeyCode::Char('t') => self.start_temp_picker(),
                 KeyCode::Char('p') => self.apply_last_color().await?,
                 KeyCode::Char(c @ '1'..='9') => self.apply_favorite(c).await?,
                 _ => {}
@@ -122,6 +194,31 @@ impl App {
                 KeyCode::Char(c @ '1'..='9') => self.apply_favorite(c).await?,
                 _ => {}
             },
+
+            Mode::ChangingTemp(ref mut temp) => {
+                let step = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    KELVIN_BIG_STEP
+                } else {
+                    KELVIN_STEP
+                };
+                let current = temp.current_kelvin;
+                let next = match key.code {
+                    KeyCode::Esc => {
+                        self.mode = Mode::Normal;
+                        return Ok(());
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => current.saturating_sub(step),
+                    KeyCode::Char('H') => current.saturating_sub(KELVIN_BIG_STEP),
+                    KeyCode::Right | KeyCode::Char('l') => current + step,
+                    KeyCode::Char('L') => current + KELVIN_BIG_STEP,
+                    _ => return Ok(()),
+                };
+                let next = snap_kelvin(next);
+                if next != current {
+                    temp.current_kelvin = next;
+                    self.apply_temp(next).await?;
+                }
+            }
 
             Mode::Renaming(ref mut input) => match key.code {
                 KeyCode::Char(c) => input.insert(c),
@@ -226,6 +323,31 @@ impl App {
         }
         self.favorites.push(rgb);
         self.save().await
+    }
+
+    async fn apply_temp(&mut self, kelvin: u32) -> Result<()> {
+        for i in self.color_targets() {
+            if let Some(live) = &self.devices[i].live {
+                self.backend.set_color_temp(&live.id, kelvin).await?;
+                self.devices[i].kelvin = Some(kelvin);
+            }
+        }
+        Ok(())
+    }
+
+    fn start_temp_picker(&mut self) {
+        let targets = self.color_targets();
+        let Some(&first) = targets.first() else {
+            return;
+        };
+        let kelvin = self.devices[first]
+            .kelvin
+            .map(snap_kelvin)
+            .unwrap_or(DEFAULT_KELVIN);
+        self.mode = Mode::ChangingTemp(ColorTemp {
+            current_kelvin: kelvin,
+            bar: Rect::default(),
+        });
     }
 
     fn start_color_picker(&mut self) {

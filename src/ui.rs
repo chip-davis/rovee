@@ -8,7 +8,7 @@ use ratatui::{
 
 use tui_color_picker::ColorWheel;
 
-use crate::app::{App, ColorPicker, Mode};
+use crate::app::{App, ColorPicker, ColorTemp, Mode, kelvin_for_offset, offset_for_kelvin};
 use crate::input::TextInput;
 use crate::store::{Rgb, to_hex};
 
@@ -20,6 +20,9 @@ const WHEEL_COLS: u16 = WHEEL_ROWS * 2;
 const PICKER_WIDTH: u16 = WHEEL_COLS + 6;
 const PICKER_HEIGHT: u16 = WHEEL_ROWS + 4 + 2;
 
+const TEMP_WIDTH: u16 = 64;
+const TEMP_HEIGHT: u16 = 8;
+
 pub fn render(app: &mut App, frame: &mut Frame) {
     render_list(app, frame, frame.area());
 
@@ -30,6 +33,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let target = target_label(app);
     if let Mode::ChangingColor(picker) = &mut app.mode {
         render_color_picker(picker, &target, app.last_color, &app.favorites, frame);
+    }
+    if let Mode::ChangingTemp(temp) = &mut app.mode {
+        render_temp_picker(temp, &target, frame);
     }
 }
 
@@ -66,10 +72,11 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
 
     let hints = match app.mode {
         Mode::Normal => {
-            " rovee · ↑/↓ select · space power · m mark · w wheel · p last color · 1-9 favorite · r rename · q quit "
+            " rovee · ↑/↓ select · space power · m mark · w wheel · t white · p last color · 1-9 favorite · r rename · q quit "
         }
         Mode::Renaming(_) => " rovee ",
         Mode::ChangingColor(_) => " color ",
+        Mode::ChangingTemp(_) => " white ",
     };
 
     let list = List::new(items)
@@ -185,4 +192,72 @@ fn render_color_picker(
         Line::from(favorite_spans(favorites))
     };
     frame.render_widget(Paragraph::new(favs.centered()), favorites_row);
+}
+
+fn render_temp_picker(temp: &mut ColorTemp, target: &str, frame: &mut Frame) {
+    let area = popup_area(frame.area(), TEMP_WIDTH, TEMP_HEIGHT);
+    let (r, g, b) = kelvin_to_rgb(temp.current_kelvin);
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::Rgb(r, g, b)))
+        .padding(Padding::horizontal(2))
+        .title(Line::from(format!(" white · {target} ")).bold())
+        .title_bottom(
+            Line::from(" ←/→ 100K · shift 500K · click or drag · esc close ")
+                .dim()
+                .centered(),
+        );
+
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [_, bar_area, marker_row, label_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    temp.bar = bar_area;
+
+    let bar: Line = (0..bar_area.width)
+        .map(|x| swatch(kelvin_to_rgb(kelvin_for_offset(x, bar_area.width)), 1))
+        .collect();
+    frame.render_widget(Paragraph::new(vec![bar.clone(), bar]), bar_area);
+
+    let offset = offset_for_kelvin(temp.current_kelvin, bar_area.width);
+    let marker = Line::from(format!("{}▲", " ".repeat(offset as usize)));
+    frame.render_widget(Paragraph::new(marker), marker_row);
+
+    let label = Line::from(vec![
+        Span::raw("warm  ").dim(),
+        Span::raw(format!("{}K", temp.current_kelvin)).bold(),
+        Span::raw("  cool").dim(),
+    ]);
+    frame.render_widget(Paragraph::new(label.centered()), label_row);
+}
+
+fn kelvin_to_rgb(kelvin: u32) -> Rgb {
+    let t = kelvin as f64 / 100.0;
+    let r = if t <= 66.0 {
+        255.0
+    } else {
+        329.698727446 * (t - 60.0).powf(-0.1332047592)
+    };
+    let g = if t <= 66.0 {
+        99.4708025861 * t.ln() - 161.1195681661
+    } else {
+        288.1221695283 * (t - 60.0).powf(-0.0755148492)
+    };
+    let b = if t >= 66.0 {
+        255.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        138.5177312231 * (t - 10.0).ln() - 305.0447927307
+    };
+    let c = |v: f64| v.clamp(0.0, 255.0) as u8;
+    (c(r), c(g), c(b))
 }
