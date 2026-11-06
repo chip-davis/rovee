@@ -290,6 +290,8 @@ impl App {
                 self.backend
                     .set_color(&live.id, govee::types::Color::new(r, g, b))
                     .await?;
+                self.devices[i].color = Some(rgb);
+                self.devices[i].kelvin = None;
             }
             // offline: nothing to send
         }
@@ -330,6 +332,7 @@ impl App {
             if let Some(live) = &self.devices[i].live {
                 self.backend.set_color_temp(&live.id, kelvin).await?;
                 self.devices[i].kelvin = Some(kelvin);
+                self.devices[i].color = None;
             }
         }
         Ok(())

@@ -2,7 +2,7 @@ use govee::backend::GoveeBackend;
 use govee::backend::local::LocalBackend;
 use govee::types::Device;
 
-use crate::store::SavedDevice;
+use crate::store::{Rgb, SavedDevice};
 
 pub struct AppDevice {
     pub saved: SavedDevice,
@@ -10,6 +10,7 @@ pub struct AppDevice {
     pub on: bool,
     pub marked: bool,
     pub kelvin: Option<u32>,
+    pub color: Option<Rgb>,
 }
 
 impl AppDevice {
@@ -20,6 +21,7 @@ impl AppDevice {
             on: false,
             marked: false,
             kelvin: None,
+            color: None,
         }
     }
 
@@ -43,6 +45,7 @@ pub async fn merge(backend: &LocalBackend, devices: &mut Vec<AppDevice>, found: 
                 on: false,
                 marked: false,
                 kelvin: None,
+                color: None,
             }),
         }
     }
@@ -53,6 +56,10 @@ pub async fn merge(backend: &LocalBackend, devices: &mut Vec<AppDevice>, found: 
         {
             d.on = state.on;
             d.kelvin = state.color_temp_kelvin;
+            d.color = match d.kelvin {
+                Some(_) => None,
+                None => Some((state.color.r, state.color.g, state.color.b)),
+            };
         }
     }
 }
