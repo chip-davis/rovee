@@ -55,7 +55,7 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
         .collect();
 
     let hints = match app.mode {
-        Mode::Normal => " rovee · ↑/↓ select · space toggle · c color · r rename · q quit ",
+        Mode::Normal => " rovee · ↑/↓ select · space toggle · w wheel · r rename · q quit ",
         Mode::Renaming(_) => " rovee ",
         Mode::ChangingColor(_) => " color ",
     };

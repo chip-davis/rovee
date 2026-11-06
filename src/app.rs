@@ -103,7 +103,7 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
                 KeyCode::Char(' ') => self.toggle_selected().await?,
                 KeyCode::Char('r') => self.start_rename(),
-                KeyCode::Char('c') => self.start_color_picker(),
+                KeyCode::Char('w') => self.start_color_picker(),
                 _ => {}
             },
 
