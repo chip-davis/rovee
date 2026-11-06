@@ -9,13 +9,12 @@ use ratatui::{
 use tui_color_picker::ColorWheel;
 
 use crate::app::{
-    App, Branch, ColorPicker, ColorTemp, GroupMenu, Mode, Row, kelvin_for_offset,
+    App, Branch, ColorPicker, ColorTemp, Field, Focus, GroupMenu, Mode, Row, kelvin_for_offset,
     offset_for_kelvin,
 };
-use crate::store::SavedGroup;
 use crate::devices::AppDevice;
 use crate::input::TextInput;
-use crate::store::{Rgb, to_hex};
+use crate::store::{Rgb, SavedGroup, to_hex};
 
 const ACCENT: Rgb = (0x6e, 0x94, 0xb2);
 const PURPLE: Rgb = (0xbb, 0x9d, 0xbd);
@@ -23,7 +22,6 @@ const WARM: Rgb = (0xe8, 0xb5, 0x89);
 const FG: Color = Color::Rgb(0xcd, 0xcd, 0xcd);
 const MUTED: Color = Color::Rgb(0x87, 0x87, 0x87);
 const DIM: Color = Color::Rgb(0x60, 0x60, 0x79);
-const SURFACE: Color = Color::Rgb(0x14, 0x14, 0x15);
 const LINE: Color = Color::Rgb(0x25, 0x25, 0x30);
 const GREEN: Color = Color::Rgb(0x7f, 0xa5, 0x63);
 const RED: Color = Color::Rgb(0xd8, 0x64, 0x7e);
@@ -51,6 +49,10 @@ const PICKER_HEIGHT: u16 = WHEEL_ROWS + 4 + 2;
 const TEMP_WIDTH: u16 = 64;
 const TEMP_HEIGHT: u16 = 7;
 
+const LABEL_WIDTH: u16 = 10;
+const SWATCH_ROWS: u16 = 3;
+const TEMP_ROWS: u16 = 4;
+
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let header_height = if area.height >= FULL_HEADER_MIN_HEIGHT && area.width >= LOGO_WIDTH + 4 {
@@ -69,20 +71,27 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     render_header(app, frame, header);
 
-    if body.width >= DETAILS_MIN_WIDTH {
-        let [list_area, details_area] =
+    app.card_visible = body.width >= DETAILS_MIN_WIDTH;
+    if !app.card_visible {
+        app.focus = Focus::List;
+        app.card_color_area = Rect::default();
+    }
+
+    if app.card_visible {
+        let [list_area, card_area] =
             Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
                 .areas(body);
         render_list(app, frame, list_area);
-        render_details(app, frame, details_area);
+        render_card(app, frame, card_area);
     } else {
         render_list(app, frame, body);
     }
 
     render_palette(app.last_color, &app.favorites, frame, palette);
-    render_footer(&app.mode, frame, footer);
+    render_footer(app, frame, footer);
 
-    if let Mode::Renaming(input) = &app.mode {
+    let inline = app.focus == Focus::Card;
+    if !inline && let Mode::Renaming(input) = &app.mode {
         render_text_popup(input, "rename", frame);
     }
     if let Mode::NamingGroup { input, .. } = &app.mode {
@@ -92,6 +101,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         render_group_menu(menu, &app.groups, &app.devices, frame);
     }
 
+    if inline {
+        return;
+    }
     let target = target_label(app);
     if let Mode::ChangingColor(picker) = &mut app.mode {
         render_color_picker(picker, &target, app.last_color, &app.favorites, frame);
@@ -285,129 +297,260 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
+    let focused = app.focus == Focus::List;
     let count = app.devices.len();
+    let border = if focused { rgb(ACCENT) } else { DIM };
+    let (highlight, symbol) = if focused {
+        (Style::new().bg(LINE), Line::from("▌").fg(rgb(ACCENT)))
+    } else {
+        (Style::new(), Line::from("▌").fg(DIM))
+    };
     let list = List::new(items)
         .block(
             panel("lights")
+                .border_style(Style::new().fg(border))
                 .title(Line::from(format!(" {count} ")).fg(DIM).right_aligned())
                 .padding(Padding::new(1, 1, 1, 0)),
         )
-        .highlight_style(Style::new().bg(LINE))
-        .highlight_symbol(Line::from("▌").fg(rgb(ACCENT)));
+        .highlight_style(highlight)
+        .highlight_symbol(symbol);
     frame.render_stateful_widget(list, area, &mut app.selected);
 }
 
-fn render_details(app: &App, frame: &mut Frame, area: Rect) {
-    match app.selected_row() {
-        Some(Row::Group(g)) => render_group_details(app, g, frame, area),
-        Some(Row::Device(i)) => render_device_details(&app.devices[i], frame, area),
-        None => frame.render_widget(panel("details"), area),
+struct Card {
+    title: String,
+    accent: Color,
+    colors: Vec<Option<Rgb>>,
+    power: Span<'static>,
+    mode: Span<'static>,
+    brightness: Option<u8>,
+    extra: Vec<Line<'static>>,
+}
+
+fn build_card(app: &App) -> Option<Card> {
+    match app.selected_row()? {
+        Row::Device(i) => {
+            let d = &app.devices[i];
+            let color = device_rgb(d);
+            let power = match (d.online(), d.on) {
+                (false, _) => Span::raw("unreachable").fg(RED),
+                (true, true) => Span::raw("on").fg(GREEN),
+                (true, false) => Span::raw("off").fg(MUTED),
+            };
+            let info = |label: &str, value: Span<'static>| {
+                Line::from(vec![
+                    Span::raw(format!("  {label:<width$}", width = LABEL_WIDTH as usize - 2)).fg(DIM),
+                    value,
+                ])
+            };
+            Some(Card {
+                title: d.saved.name.clone(),
+                accent: color.map(rgb).unwrap_or(DIM),
+                colors: vec![color],
+                power,
+                mode: device_status(d),
+                brightness: d.brightness,
+                extra: vec![
+                    info("model", Span::raw(d.saved.model.clone()).fg(MUTED)),
+                    info("id", Span::raw(d.saved.id.clone()).fg(DIM)),
+                ],
+            })
+        }
+        Row::Group(g) => {
+            let members = app.group_members(g);
+            let on = members.iter().filter(|&&i| app.devices[i].on).count();
+            let statuses: Vec<String> = members
+                .iter()
+                .map(|&i| device_status(&app.devices[i]).content.into_owned())
+                .collect();
+            let mode = match statuses.first() {
+                None => Span::raw("--").fg(DIM),
+                Some(first) if statuses.iter().all(|s| s == first) => {
+                    device_status(&app.devices[members[0]])
+                }
+                Some(_) => Span::raw("mixed").fg(MUTED),
+            };
+            let power_color = if on == 0 { MUTED } else { GREEN };
+            let mut extra = vec![Line::from("  lights").fg(DIM)];
+            if members.is_empty() {
+                extra.push(Line::from("  none yet · press g on a light to add it").fg(DIM));
+            }
+            extra.extend(members.iter().map(|&i| {
+                let d = &app.devices[i];
+                Line::from(vec![
+                    Span::raw("  "),
+                    device_dot(d),
+                    Span::raw("  "),
+                    Span::raw(format!("{:<16}", d.saved.name)).fg(FG),
+                    device_status(d),
+                ])
+            }));
+            Some(Card {
+                title: app.groups[g].name.clone(),
+                accent: rgb(PURPLE),
+                colors: members.iter().map(|&i| device_rgb(&app.devices[i])).collect(),
+                power: Span::raw(format!("{on}/{} on", members.len())).fg(power_color),
+                mode,
+                brightness: members.first().and_then(|&i| app.devices[i].brightness),
+                extra,
+            })
+        }
     }
 }
 
-fn render_group_details(app: &App, g: usize, frame: &mut Frame, area: Rect) {
-    let members = app.group_members(g);
-    let block = panel(&app.groups[g].name)
-        .border_style(Style::new().fg(rgb(PURPLE)))
-        .padding(Padding::new(2, 2, 1, 0));
+fn render_card(app: &mut App, frame: &mut Frame, area: Rect) {
+    let Some(card) = build_card(app) else {
+        frame.render_widget(panel("details"), area);
+        app.card_color_area = Rect::default();
+        return;
+    };
+
+    let focused = app.focus == Focus::Card;
+    let border = if focused { rgb(ACCENT) } else { card.accent };
+    let block = panel(&card.title)
+        .border_style(Style::new().fg(border))
+        .padding(Padding::new(1, 2, 1, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if members.is_empty() {
-        let hint = vec![
-            Line::from("no lights in this group yet").fg(MUTED),
-            Line::default(),
-            Line::from("select a light and press g to add it").fg(DIM),
-        ];
-        frame.render_widget(Paragraph::new(hint), inner);
+    let field = app.field;
+    let label = |text: &str, f: Field| -> Span<'static> {
+        let width = LABEL_WIDTH as usize - 2;
+        if focused && field == f {
+            Span::raw(format!("▸ {text:<width$}")).fg(rgb(ACCENT)).bold()
+        } else {
+            Span::raw(format!("  {text:<width$}")).fg(DIM)
+        }
+    };
+    let split = |row: Rect| -> (Rect, Rect) {
+        let [l, r] = Layout::horizontal([Constraint::Length(LABEL_WIDTH), Constraint::Min(0)])
+            .areas(row);
+        (l, r)
+    };
+
+    let wheel_open = focused && matches!(app.mode, Mode::ChangingColor(_));
+    let temp_open = focused && matches!(app.mode, Mode::ChangingTemp(_));
+
+    if wheel_open {
+        let [name_row, _, wheel_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
+        render_name_row(app, &card, frame, name_row, label("name", Field::Name), focused);
+        app.card_color_area = Rect::default();
+        let last = app.last_color;
+        if let Mode::ChangingColor(picker) = &mut app.mode {
+            draw_wheel(picker, last, &app.favorites, frame, wheel_area);
+        }
         return;
     }
 
-    let [swatch_area, _, list_area] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
+    let color_rows = if temp_open { TEMP_ROWS } else { SWATCH_ROWS };
+    let [name_row, _, color_area, _, power_row, mode_row, bright_row, _, extra_area] =
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(color_rows),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
 
-    let width = swatch_area.width as usize;
-    let cell = (width / members.len()).max(1);
-    let strip: Line = members
+    render_name_row(app, &card, frame, name_row, label("name", Field::Name), focused);
+
+    let (color_label, color_value) = split(color_area);
+    if temp_open {
+        frame.render_widget(Paragraph::new(label("white", Field::Mode)), color_label);
+        app.card_color_area = Rect::default();
+        if let Mode::ChangingTemp(temp) = &mut app.mode {
+            draw_temp(temp, frame, color_value);
+        }
+    } else {
+        frame.render_widget(Paragraph::new(label("color", Field::Color)), color_label);
+        let strip = color_strip(&card.colors, color_value.width as usize);
+        frame.render_widget(
+            Paragraph::new(vec![strip; color_value.height as usize]),
+            color_value,
+        );
+        app.card_color_area = color_value;
+    }
+
+    let row = |l: Span<'static>, value: Vec<Span<'static>>| {
+        let mut spans = vec![l];
+        spans.extend(value);
+        Line::from(spans)
+    };
+    frame.render_widget(
+        Paragraph::new(row(label("power", Field::Power), vec![card.power.clone()])),
+        power_row,
+    );
+    frame.render_widget(
+        Paragraph::new(row(label("mode", Field::Mode), vec![card.mode.clone()])),
+        mode_row,
+    );
+    let mut bright = brightness_meter(card.brightness, card.colors.first().copied().flatten());
+    if focused && field == Field::Brightness {
+        bright.push(Span::raw("   ←/→").fg(DIM));
+    }
+    frame.render_widget(
+        Paragraph::new(row(label("bright", Field::Brightness), bright)),
+        bright_row,
+    );
+
+    frame.render_widget(Paragraph::new(card.extra), extra_area);
+}
+
+fn render_name_row(
+    app: &App,
+    card: &Card,
+    frame: &mut Frame,
+    area: Rect,
+    label: Span<'static>,
+    focused: bool,
+) {
+    let editing = match &app.mode {
+        Mode::Renaming(input) if focused => Some(input),
+        _ => None,
+    };
+    let value = match editing {
+        Some(input) => Span::raw(input.value.clone()).fg(FG).underlined(),
+        None => Span::raw(card.title.clone()).fg(FG).bold(),
+    };
+    frame.render_widget(Paragraph::new(Line::from(vec![label, value])), area);
+    if let Some(input) = editing {
+        frame.set_cursor_position(Position::new(
+            area.x + LABEL_WIDTH + input.cursor as u16,
+            area.y,
+        ));
+    }
+}
+
+fn color_strip(colors: &[Option<Rgb>], width: usize) -> Line<'static> {
+    if colors.is_empty() {
+        return Line::from("░".repeat(width)).fg(LINE);
+    }
+    let cell = (width / colors.len()).max(1);
+    colors
         .iter()
         .enumerate()
-        .map(|(n, &i)| {
-            let w = if n + 1 == members.len() {
+        .map(|(n, c)| {
+            let w = if n + 1 == colors.len() {
                 width.saturating_sub(cell * n)
             } else {
                 cell
             };
-            match device_rgb(&app.devices[i]) {
-                Some(c) => swatch(c, w),
+            match c {
+                Some(c) => swatch(*c, w),
                 None => Span::raw("░".repeat(w)).fg(LINE),
             }
         })
-        .collect();
-    frame.render_widget(Paragraph::new(vec![strip.clone(), strip.clone(), strip]), swatch_area);
-
-    let lines: Vec<Line> = members
-        .iter()
-        .map(|&i| {
-            let d = &app.devices[i];
-            Line::from(vec![
-                device_dot(d),
-                Span::raw("  "),
-                Span::raw(format!("{:<16}", d.saved.name)).fg(FG),
-                device_status(d),
-            ])
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), list_area);
-}
-
-fn render_device_details(d: &AppDevice, frame: &mut Frame, area: Rect) {
-    let color = device_rgb(d);
-    let block = panel(&d.saved.name)
-        .border_style(Style::new().fg(color.map(rgb).unwrap_or(DIM)))
-        .padding(Padding::new(2, 2, 1, 0));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let [swatch_area, _, info_area] = Layout::vertical([
-        Constraint::Length(5),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
-
-    let fill: Vec<Line> = (0..swatch_area.height)
-        .map(|_| match color {
-            Some(c) => swatch(c, swatch_area.width as usize).into(),
-            None => Line::from("░".repeat(swatch_area.width as usize)).fg(LINE),
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(fill), swatch_area);
-
-    let row = |label: &str, value: Span<'static>| {
-        Line::from(vec![Span::raw(format!("{label:<8}")).fg(DIM), value])
-    };
-    let power = match (d.online(), d.on) {
-        (false, _) => Span::raw("unreachable").fg(RED),
-        (true, true) => Span::raw("on").fg(GREEN),
-        (true, false) => Span::raw("off").fg(MUTED),
-    };
-    let info = vec![
-        row("power", power),
-        row("mode", device_status(d)),
-        Line::from(
-            [Span::raw(format!("{:<8}", "bright")).fg(DIM)]
-                .into_iter()
-                .chain(brightness_meter(d.brightness, color))
-                .collect::<Vec<_>>(),
-        ),
-        row("model", Span::raw(d.saved.model.clone()).fg(FG)),
-        row("id", Span::raw(d.saved.id.clone()).fg(MUTED)),
-    ];
-    frame.render_widget(Paragraph::new(info), info_area);
+        .collect()
 }
 
 fn brightness_meter(brightness: Option<u8>, color: Option<Rgb>) -> Vec<Span<'static>> {
@@ -452,15 +595,16 @@ fn swatch((r, g, b): Rgb, width: usize) -> Span<'static> {
     Span::styled("█".repeat(width), Style::new().fg(Color::Rgb(r, g, b)))
 }
 
-fn render_footer(mode: &Mode, frame: &mut Frame, area: Rect) {
-    let keys: &[(&str, &str)] = match mode {
-        Mode::Normal => &[
+fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
+    let keys: Vec<(&str, &str)> = match (&app.mode, app.focus) {
+        (Mode::Normal, Focus::List) => vec![
             ("↑↓", "select"),
+            ("tab", "card"),
             ("space", "power"),
-            ("+/-", "brightness"),
-            ("enter", "fold"),
+            ("+/-", "bright"),
+            ("enter", "open"),
             ("g", "group"),
-            ("d", "delete group"),
+            ("d", "delete"),
             ("w", "wheel"),
             ("t", "white"),
             ("p", "last"),
@@ -469,28 +613,43 @@ fn render_footer(mode: &Mode, frame: &mut Frame, area: Rect) {
             ("s", "rescan"),
             ("q", "quit"),
         ],
-        Mode::Renaming(_) => &[("enter", "save"), ("esc", "cancel")],
-        Mode::ChangingColor(_) => &[
+        (Mode::Normal, Focus::Card) => {
+            let mut keys = vec![("↑↓", "field")];
+            match app.field {
+                Field::Name => keys.push(("enter", "rename")),
+                Field::Color => keys.push(("enter", "color wheel")),
+                Field::Mode => keys.push(("enter", "white")),
+                Field::Power => keys.push(("enter", "toggle")),
+                Field::Brightness => keys.push(("←→", "adjust")),
+            }
+            keys.extend([("p", "last"), ("1-9", "favorite"), ("tab", "list"), ("q", "quit")]);
+            keys
+        }
+        (Mode::Renaming(_), _) => vec![("enter", "save"), ("esc", "cancel")],
+        (Mode::ChangingColor(_), _) => vec![
             ("click", "set color"),
             ("f", "save favorite"),
             ("1-9", "favorite"),
             ("esc", "close"),
         ],
-        Mode::ChangingTemp(_) => &[
+        (Mode::ChangingTemp(_), _) => vec![
             ("←→", "100K"),
             ("shift", "500K"),
             ("drag", "set"),
             ("esc", "close"),
         ],
-        Mode::Grouping(_) => &[("↑↓", "select"), ("enter", "toggle"), ("esc", "close")],
-        Mode::NamingGroup { .. } => &[("enter", "create"), ("esc", "cancel")],
+        (Mode::Grouping(_), _) => vec![("↑↓", "select"), ("enter", "toggle"), ("esc", "close")],
+        (Mode::NamingGroup { .. }, _) => vec![("enter", "create"), ("esc", "cancel")],
     };
     let spans: Vec<Span> = keys
         .iter()
-        .flat_map(|(key, label)| {
+        .enumerate()
+        .flat_map(|(n, (key, label))| {
+            let sep = if n == 0 { "" } else { "  ·  " };
             [
-                Span::styled(format!(" {key} "), Style::new().fg(SURFACE).bg(rgb(ACCENT)).bold()),
-                Span::raw(format!(" {label}  ")).fg(MUTED),
+                Span::raw(sep).fg(LINE),
+                Span::raw(key.to_string()).fg(MUTED),
+                Span::raw(format!(" {label}")).fg(DIM),
             ]
         })
         .collect();
@@ -580,16 +739,31 @@ fn render_color_picker(
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_wheel(picker, last, favorites, frame, inner);
+}
 
+fn draw_wheel(
+    picker: &mut ColorPicker,
+    last: Option<Rgb>,
+    favorites: &[Rgb],
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let rows = area
+        .height
+        .saturating_sub(4)
+        .min(WHEEL_ROWS)
+        .min(area.width / 2)
+        .max(1);
     let [wheel_row, _, swatch_row, _, favorites_row] = Layout::vertical([
-        Constraint::Length(WHEEL_ROWS),
+        Constraint::Length(rows),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .areas(inner);
-    let [wheel_area] = Layout::horizontal([Constraint::Length(WHEEL_COLS)])
+    .areas(area);
+    let [wheel_area] = Layout::horizontal([Constraint::Length(rows * 2)])
         .flex(Flex::Center)
         .areas(wheel_row);
 
@@ -617,13 +791,17 @@ fn render_temp_picker(temp: &mut ColorTemp, target: &str, frame: &mut Frame) {
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    draw_temp(temp, frame, inner);
+}
 
+fn draw_temp(temp: &mut ColorTemp, frame: &mut Frame, area: Rect) {
+    let current = kelvin_to_rgb(temp.current_kelvin);
     let [bar_area, marker_row, label_row] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .areas(inner);
+    .areas(area);
     temp.bar = bar_area;
 
     let bar: Line = (0..bar_area.width)

@@ -56,6 +56,41 @@ pub enum Branch {
     Last,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    List,
+    Card,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Name,
+    Color,
+    Power,
+    Mode,
+    Brightness,
+}
+
+impl Field {
+    pub const ALL: [Field; 5] = [
+        Field::Name,
+        Field::Color,
+        Field::Power,
+        Field::Mode,
+        Field::Brightness,
+    ];
+
+    fn step(self, down: bool) -> Field {
+        let i = Self::ALL.iter().position(|&f| f == self).unwrap_or(0);
+        let next = if down {
+            (i + 1).min(Self::ALL.len() - 1)
+        } else {
+            i.saturating_sub(1)
+        };
+        Self::ALL[next]
+    }
+}
+
 pub struct GroupMenu {
     pub list: ListState,
     pub device: usize,
@@ -108,6 +143,10 @@ pub struct App {
     pub groups: Vec<SavedGroup>,
     pub selected: ListState,
     pub mode: Mode,
+    pub focus: Focus,
+    pub field: Field,
+    pub card_visible: bool,
+    pub card_color_area: Rect,
     pub path: PathBuf,
     pub running: bool,
     pub scanning: bool,
@@ -137,6 +176,10 @@ impl App {
             groups: saved.groups,
             selected: ListState::default().with_selected(Some(0)),
             mode: Mode::Normal,
+            focus: Focus::List,
+            field: Field::Color,
+            card_visible: false,
+            card_color_area: Rect::default(),
             path,
             running: true,
             scanning: false,
@@ -168,6 +211,19 @@ impl App {
 
     async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         match self.mode {
+            Mode::Normal => {
+                let click = Position::new(mouse.column, mouse.row);
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                    && self.card_visible
+                    && self.card_color_area.contains(click)
+                {
+                    self.focus = Focus::Card;
+                    self.field = Field::Color;
+                    self.start_color_picker();
+                }
+                Ok(())
+            }
+
             Mode::ChangingColor(ref picker) => {
                 if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                     return Ok(());
@@ -206,27 +262,77 @@ impl App {
         }
     }
 
+    async fn handle_list_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.running = false,
+            KeyCode::Down | KeyCode::Char('j') => self.selected.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
+            KeyCode::Char(' ') => self.toggle_selected().await?,
+            KeyCode::Tab => self.focus_card(),
+            KeyCode::Enter => match self.selected_row() {
+                Some(Row::Group(_)) => self.set_collapsed(None).await?,
+                Some(Row::Device(_)) => self.focus_card(),
+                None => {}
+            },
+            KeyCode::Left | KeyCode::Char('h') => self.set_collapsed(Some(true)).await?,
+            KeyCode::Right | KeyCode::Char('l') => self.set_collapsed(Some(false)).await?,
+            KeyCode::Char('g') => self.start_grouping(),
+            KeyCode::Char('d') => self.delete_selected_group().await?,
+            KeyCode::Char('r') => self.start_rename(),
+            KeyCode::Char('s') | KeyCode::F(5) => self.scanning = true,
+            KeyCode::Char('w') => self.start_color_picker(),
+            KeyCode::Char('t') => self.start_temp_picker(),
+            KeyCode::Char('p') => self.apply_last_color().await?,
+            KeyCode::Char('+') | KeyCode::Char('=') => self.step_brightness(true).await?,
+            KeyCode::Char('-') | KeyCode::Char('_') => self.step_brightness(false).await?,
+            KeyCode::Char(c @ '1'..='9') => self.apply_favorite(c).await?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_card_key(&mut self, key: KeyEvent) -> Result<()> {
+        let on_brightness = self.field == Field::Brightness;
+        match key.code {
+            KeyCode::Tab | KeyCode::Esc => self.focus = Focus::List,
+            KeyCode::Up | KeyCode::Char('k') => self.field = self.field.step(false),
+            KeyCode::Down | KeyCode::Char('j') => self.field = self.field.step(true),
+            KeyCode::Enter => self.activate_field().await?,
+            KeyCode::Left | KeyCode::Char('h') if on_brightness => {
+                self.step_brightness(false).await?
+            }
+            KeyCode::Right | KeyCode::Char('l') if on_brightness => {
+                self.step_brightness(true).await?
+            }
+            KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::List,
+            KeyCode::Right | KeyCode::Char('l') => {}
+            _ => self.handle_list_key(key).await?,
+        }
+        Ok(())
+    }
+
+    fn focus_card(&mut self) {
+        if self.card_visible && self.selected_row().is_some() {
+            self.focus = Focus::Card;
+        }
+    }
+
+    async fn activate_field(&mut self) -> Result<()> {
+        match self.field {
+            Field::Name => self.start_rename(),
+            Field::Color => self.start_color_picker(),
+            Field::Mode => self.start_temp_picker(),
+            Field::Power => self.toggle_selected().await?,
+            Field::Brightness => {}
+        }
+        Ok(())
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         match self.mode {
-            Mode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => self.running = false,
-                KeyCode::Down | KeyCode::Char('j') => self.selected.select_next(),
-                KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
-                KeyCode::Char(' ') => self.toggle_selected().await?,
-                KeyCode::Enter | KeyCode::Tab => self.set_collapsed(None).await?,
-                KeyCode::Left | KeyCode::Char('h') => self.set_collapsed(Some(true)).await?,
-                KeyCode::Right | KeyCode::Char('l') => self.set_collapsed(Some(false)).await?,
-                KeyCode::Char('g') => self.start_grouping(),
-                KeyCode::Char('d') => self.delete_selected_group().await?,
-                KeyCode::Char('r') => self.start_rename(),
-                KeyCode::Char('s') | KeyCode::F(5) => self.scanning = true,
-                KeyCode::Char('w') => self.start_color_picker(),
-                KeyCode::Char('t') => self.start_temp_picker(),
-                KeyCode::Char('p') => self.apply_last_color().await?,
-                KeyCode::Char('+') | KeyCode::Char('=') => self.step_brightness(true).await?,
-                KeyCode::Char('-') | KeyCode::Char('_') => self.step_brightness(false).await?,
-                KeyCode::Char(c @ '1'..='9') => self.apply_favorite(c).await?,
-                _ => {}
+            Mode::Normal => match self.focus {
+                Focus::List => self.handle_list_key(key).await?,
+                Focus::Card => self.handle_card_key(key).await?,
             },
 
             Mode::ChangingColor(_) => match key.code {
