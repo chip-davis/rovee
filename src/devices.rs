@@ -19,13 +19,11 @@ impl AppDevice {
         }
     }
 
-    /// Found by the last LAN scan.
     pub fn online(&self) -> bool {
         self.live.is_some()
     }
 }
 
-/// Attach scan results to saved devices, add new ones, then read power state.
 pub async fn merge(backend: &LocalBackend, devices: &mut Vec<AppDevice>, found: Vec<Device>) {
     for f in found {
         let id = f.id.to_string();

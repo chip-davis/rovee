@@ -92,8 +92,6 @@ impl App {
     }
 
     async fn toggle_selected(&mut self) -> Result<()> {
-        // Index the fields directly (not via a `&mut self` helper) so
-        // `self.devices` and `self.backend` can be borrowed at the same time.
         let Some(d) = self
             .selected
             .selected()
@@ -102,7 +100,7 @@ impl App {
             return Ok(());
         };
         let Some(live) = &d.live else {
-            return Ok(()); // offline: nothing to send
+            return Ok(());
         };
 
         let new_state = !d.on;

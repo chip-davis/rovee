@@ -10,7 +10,6 @@ pub struct SavedDevice {
     pub name: String,
 }
 
-/// On-disk layout: a list of `[[device]]` tables.
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct SavedFile {
     #[serde(default)]
@@ -25,7 +24,6 @@ pub fn config_path() -> PathBuf {
         .join("devices.toml")
 }
 
-/// Read saved devices; a missing file just means none saved yet.
 pub async fn load(path: &Path) -> Result<Vec<SavedDevice>> {
     match tokio::fs::read_to_string(path).await {
         Ok(text) => Ok(toml::from_str::<SavedFile>(&text)?.device),

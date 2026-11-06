@@ -8,7 +8,6 @@ mod ui;
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    // Scan before taking over the terminal.
     let mut app = app::App::new().await?;
 
     let mut terminal = ratatui::init();

@@ -1,7 +1,5 @@
-/// A single-line text field with a cursor, for the rename popup.
 pub struct TextInput {
     pub value: String,
-    /// Cursor position in characters, not bytes.
     pub cursor: usize,
 }
 
