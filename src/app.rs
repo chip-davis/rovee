@@ -18,7 +18,12 @@ use crate::ui;
 pub enum Mode {
     Normal,
     Renaming(TextInput),
-    ChangingColor(RectState),
+    ChangingColor(ColorPicker),
+}
+
+pub struct ColorPicker {
+    pub wheel: RectState,
+    pub picked: Option<(u8, u8, u8)>,
 }
 
 pub struct App {
@@ -70,7 +75,7 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
-        let Mode::ChangingColor(ref rect_state) = self.mode else {
+        let Mode::ChangingColor(ref mut picker) = self.mode else {
             return Ok(());
         };
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
@@ -78,13 +83,14 @@ impl App {
         }
 
         let click = Position::new(mouse.column, mouse.row);
-        if !rect_state.rect().contains(click) {
+        if !picker.wheel.rect().contains(click) {
             return Ok(());
         }
 
-        let TuiColor::Rgb(r, g, b) = rect_state.color(mouse.column, mouse.row) else {
+        let TuiColor::Rgb(r, g, b) = picker.wheel.color(mouse.column, mouse.row) else {
             return Ok(());
         };
+        picker.picked = Some((r, g, b));
         self.set_selected_color(govee::types::Color::new(r, g, b))
             .await
     }
@@ -101,7 +107,7 @@ impl App {
                 _ => {}
             },
 
-            Mode::ChangingColor(ref mut color) => match key.code {
+            Mode::ChangingColor(_) => match key.code {
                 KeyCode::Esc => self.mode = Mode::Normal,
                 _ => {}
             },
@@ -142,8 +148,11 @@ impl App {
     }
 
     fn start_color_picker(&mut self) {
-        if let Some(d) = self.selected_device() {
-            self.mode = Mode::ChangingColor(RectState::new_with_white(1.0));
+        if self.selected_device().is_some() {
+            self.mode = Mode::ChangingColor(ColorPicker {
+                wheel: RectState::new_with_white(1.0),
+                picked: None,
+            });
         }
     }
 
