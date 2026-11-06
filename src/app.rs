@@ -15,6 +15,7 @@ use crate::ui;
 pub enum Mode {
     Normal,
     Renaming(TextInput),
+    ChangingColor,
 }
 
 pub struct App {
@@ -71,6 +72,12 @@ impl App {
                 KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
                 KeyCode::Char(' ') => self.toggle_selected().await?,
                 KeyCode::Char('r') => self.start_rename(),
+                KeyCode::Char('c') => self.start_color_picker(),
+                _ => {}
+            },
+
+            Mode::ChangingColor => match key.code {
+                KeyCode::Esc => self.mode = Mode::Normal,
                 _ => {}
             },
 
@@ -106,6 +113,16 @@ impl App {
         let new_state = !d.on;
         self.backend.set_power(&live.id, new_state).await?;
         d.on = new_state;
+        Ok(())
+    }
+
+    fn start_color_picker(&mut self) {
+        if let Some(d) = self.selected_device() {
+            self.mode = Mode::ChangingColor;
+        }
+    }
+
+    fn finish_color_picker(&mut self) -> Result<()> {
         Ok(())
     }
 

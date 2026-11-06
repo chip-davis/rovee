@@ -6,6 +6,8 @@ use ratatui::{
     widgets::{Block, Clear, List, ListItem, Paragraph},
 };
 
+use tui_color_picker::{ColorRect, ColorWheel, RectState};
+
 use crate::app::{App, Mode};
 use crate::input::TextInput;
 
@@ -17,6 +19,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     if let Mode::Renaming(input) = &app.mode {
         render_rename_popup(input, frame);
+    }
+
+    if let Mode::ChangingColor = &app.mode {
+        render_color_picker_wheel(frame);
     }
 }
 
@@ -38,8 +44,9 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
         .collect();
 
     let hints = match app.mode {
-        Mode::Normal => " rovee · ↑/↓ select · space toggle · r rename · q quit ",
+        Mode::Normal => " rovee · ↑/↓ select · space toggle · c color · r rename · q quit ",
         Mode::Renaming(_) => " rovee ",
+        Mode::ChangingColor => " color ",
     };
 
     let list = List::new(items)
@@ -56,10 +63,7 @@ fn render_rename_popup(input: &TextInput, frame: &mut Frame) {
             .block(Block::bordered().title(" rename · enter save · esc cancel ")),
         area,
     );
-    frame.set_cursor_position(Position::new(
-        area.x + 1 + input.cursor as u16,
-        area.y + 1,
-    ));
+    frame.set_cursor_position(Position::new(area.x + 1 + input.cursor as u16, area.y + 1));
 }
 
 fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
@@ -70,4 +74,13 @@ fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
         .flex(Flex::Center)
         .areas(area);
     area
+}
+
+fn render_color_picker_wheel(frame: &mut Frame) {
+    let mut rec_no_grad = RectState::new(0.9, 0.8);
+    frame.render_stateful_widget(
+        ColorWheel::new(),
+        Rect::new(35, 5, 12, 12),
+        &mut rec_no_grad,
+    );
 }
