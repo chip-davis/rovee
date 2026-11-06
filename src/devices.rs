@@ -11,6 +11,7 @@ pub struct AppDevice {
     pub marked: bool,
     pub kelvin: Option<u32>,
     pub color: Option<Rgb>,
+    pub brightness: Option<u8>,
 }
 
 impl AppDevice {
@@ -22,6 +23,7 @@ impl AppDevice {
             marked: false,
             kelvin: None,
             color: None,
+            brightness: None,
         }
     }
 
@@ -46,6 +48,7 @@ pub async fn merge(backend: &LocalBackend, devices: &mut Vec<AppDevice>, found: 
                 marked: false,
                 kelvin: None,
                 color: None,
+                brightness: None,
             }),
         }
     }
@@ -55,6 +58,7 @@ pub async fn merge(backend: &LocalBackend, devices: &mut Vec<AppDevice>, found: 
             && let Ok(state) = backend.get_state(&live.id).await
         {
             d.on = state.on;
+            d.brightness = Some(state.brightness);
             d.kelvin = state.color_temp_kelvin;
             d.color = match d.kelvin {
                 Some(_) => None,

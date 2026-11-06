@@ -30,6 +30,10 @@ const KELVIN_STEP: u32 = 100;
 const KELVIN_BIG_STEP: u32 = 500;
 const DEFAULT_KELVIN: u32 = 4000;
 
+const MIN_BRIGHTNESS: u8 = 1;
+const MAX_BRIGHTNESS: u8 = 100;
+const BRIGHTNESS_STEP: u8 = 10;
+
 pub enum Mode {
     Normal,
     Renaming(TextInput),
@@ -85,6 +89,7 @@ pub struct App {
     pub mode: Mode,
     pub path: PathBuf,
     pub running: bool,
+    pub scanning: bool,
     /// Last color sent from the wheel or a favorite; `p` applies it again.
     pub last_color: Option<Rgb>,
     pub favorites: Vec<Rgb>,
@@ -112,6 +117,7 @@ impl App {
             mode: Mode::Normal,
             path,
             running: true,
+            scanning: false,
             last_color: None,
             favorites: saved.favorites,
         };
@@ -122,6 +128,12 @@ impl App {
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while self.running {
             terminal.draw(|frame| ui::render(self, frame))?;
+
+            if self.scanning {
+                self.rescan().await?;
+                self.scanning = false;
+                continue;
+            }
 
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key).await?,
@@ -181,9 +193,12 @@ impl App {
                 KeyCode::Char(' ') => self.toggle_selected().await?,
                 KeyCode::Char('m') => self.toggle_mark(),
                 KeyCode::Char('r') => self.start_rename(),
+                KeyCode::Char('s') | KeyCode::F(5) => self.scanning = true,
                 KeyCode::Char('w') => self.start_color_picker(),
                 KeyCode::Char('t') => self.start_temp_picker(),
                 KeyCode::Char('p') => self.apply_last_color().await?,
+                KeyCode::Char('+') | KeyCode::Char('=') => self.step_brightness(true).await?,
+                KeyCode::Char('-') | KeyCode::Char('_') => self.step_brightness(false).await?,
                 KeyCode::Char(c @ '1'..='9') => self.apply_favorite(c).await?,
                 _ => {}
             },
@@ -325,6 +340,41 @@ impl App {
         }
         self.favorites.push(rgb);
         self.save().await
+    }
+
+    async fn rescan(&mut self) -> Result<()> {
+        self.backend.discover().await?;
+        let found = self.backend.list_devices().await?;
+        for d in &mut self.devices {
+            d.live = None;
+        }
+        crate::devices::merge(&self.backend, &mut self.devices, found).await;
+        self.save().await
+    }
+
+    async fn step_brightness(&mut self, up: bool) -> Result<()> {
+        let targets = self.color_targets();
+        let Some(&first) = targets.first() else {
+            return Ok(());
+        };
+        let current = self.devices[first].brightness.unwrap_or(MAX_BRIGHTNESS);
+        let next = if up {
+            current.saturating_add(BRIGHTNESS_STEP)
+        } else {
+            current.saturating_sub(BRIGHTNESS_STEP)
+        }
+        .clamp(MIN_BRIGHTNESS, MAX_BRIGHTNESS);
+        if next == current {
+            return Ok(());
+        }
+
+        for i in targets {
+            if let Some(live) = &self.devices[i].live {
+                self.backend.set_brightness(&live.id, next).await?;
+                self.devices[i].brightness = Some(next);
+            }
+        }
+        Ok(())
     }
 
     async fn apply_temp(&mut self, kelvin: u32) -> Result<()> {

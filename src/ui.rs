@@ -96,7 +96,11 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     let status = Line::from(vec![
         Span::raw("govee lan control").fg(MUTED),
         Span::raw("  ·  ").fg(DIM),
-        Span::raw(format!("{online} of {} lights online", app.devices.len())).fg(MUTED),
+        if app.scanning {
+            Span::raw("scanning…").fg(rgb(WARM)).bold()
+        } else {
+            Span::raw(format!("{online} of {} lights online", app.devices.len())).fg(MUTED)
+        },
     ]);
 
     if area.height == 1 {
@@ -212,12 +216,20 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 Span::raw("  "),
                 Span::styled(d.saved.name.clone(), name_style),
             ]);
-            let detail = Line::from(vec![
+            let mut detail_spans = vec![
                 Span::raw("     "),
                 Span::raw(d.saved.model.clone()).fg(DIM),
                 Span::raw("  ·  ").fg(DIM),
                 device_status(d),
-            ]);
+            ];
+            if d.online()
+                && d.on
+                && let Some(b) = d.brightness
+            {
+                detail_spans.push(Span::raw("  ·  ").fg(DIM));
+                detail_spans.push(Span::raw(format!("{b}%")).fg(MUTED));
+            }
+            let detail = Line::from(detail_spans);
             ListItem::new(vec![title, detail, Line::default()])
         })
         .collect();
@@ -273,6 +285,12 @@ fn render_details(app: &App, frame: &mut Frame, area: Rect) {
     let mut info = vec![
         row("power", power),
         row("mode", device_status(d)),
+        Line::from(
+            [Span::raw(format!("{:<8}", "bright")).fg(DIM)]
+                .into_iter()
+                .chain(brightness_meter(d.brightness, color))
+                .collect::<Vec<_>>(),
+        ),
         row("model", Span::raw(d.saved.model.clone()).fg(FG)),
         row("id", Span::raw(d.saved.id.clone()).fg(MUTED)),
     ];
@@ -280,6 +298,20 @@ fn render_details(app: &App, frame: &mut Frame, area: Rect) {
         info.push(row("marked", Span::raw("yes").fg(rgb(ACCENT))));
     }
     frame.render_widget(Paragraph::new(info), info_area);
+}
+
+fn brightness_meter(brightness: Option<u8>, color: Option<Rgb>) -> Vec<Span<'static>> {
+    const CELLS: usize = 20;
+    let Some(b) = brightness else {
+        return vec![Span::raw("--").fg(DIM)];
+    };
+    let filled = (b as usize * CELLS + 50) / 100;
+    let fill = color.map(rgb).unwrap_or(rgb(ACCENT));
+    vec![
+        Span::raw("━".repeat(filled)).fg(fill),
+        Span::raw("━".repeat(CELLS - filled)).fg(LINE),
+        Span::raw(format!("  {b}%")).fg(FG),
+    ]
 }
 
 fn render_palette(last: Option<Rgb>, favorites: &[Rgb], frame: &mut Frame, area: Rect) {
@@ -315,12 +347,14 @@ fn render_footer(mode: &Mode, frame: &mut Frame, area: Rect) {
         Mode::Normal => &[
             ("↑↓", "select"),
             ("space", "power"),
+            ("+/-", "brightness"),
             ("m", "mark"),
             ("w", "wheel"),
             ("t", "white"),
             ("p", "last"),
             ("1-9", "favorite"),
             ("r", "rename"),
+            ("s", "rescan"),
             ("q", "quit"),
         ],
         Mode::Renaming(_) => &[("enter", "save"), ("esc", "cancel")],
