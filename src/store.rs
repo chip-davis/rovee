@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 
+pub type Rgb = (u8, u8, u8);
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SavedDevice {
     pub id: String,
@@ -10,8 +12,16 @@ pub struct SavedDevice {
     pub name: String,
 }
 
+#[derive(Debug, Default)]
+pub struct SavedData {
+    pub devices: Vec<SavedDevice>,
+    pub favorites: Vec<Rgb>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct SavedFile {
+    #[serde(default)]
+    favorites: Vec<String>,
     #[serde(default)]
     device: Vec<SavedDevice>,
 }
@@ -24,16 +34,21 @@ pub fn config_path() -> PathBuf {
         .join("devices.toml")
 }
 
-pub async fn load(path: &Path) -> Result<Vec<SavedDevice>> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(text) => Ok(toml::from_str::<SavedFile>(&text)?.device),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e.into()),
-    }
+pub async fn load(path: &Path) -> Result<SavedData> {
+    let file: SavedFile = match tokio::fs::read_to_string(path).await {
+        Ok(text) => toml::from_str(&text)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SavedFile::default(),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(SavedData {
+        devices: file.device,
+        favorites: file.favorites.iter().filter_map(|s| parse_hex(s)).collect(),
+    })
 }
 
-pub async fn save(path: &Path, devices: &[SavedDevice]) -> Result<()> {
+pub async fn save(path: &Path, devices: &[SavedDevice], favorites: &[Rgb]) -> Result<()> {
     let file = SavedFile {
+        favorites: favorites.iter().map(|&c| to_hex(c)).collect(),
         device: devices.to_vec(),
     };
     if let Some(dir) = path.parent() {
@@ -41,4 +56,17 @@ pub async fn save(path: &Path, devices: &[SavedDevice]) -> Result<()> {
     }
     tokio::fs::write(path, toml::to_string(&file)?).await?;
     Ok(())
+}
+
+pub fn to_hex((r, g, b): Rgb) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn parse_hex(s: &str) -> Option<Rgb> {
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if s.len() != 6 {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(s.get(i..i + 2)?, 16).ok();
+    Some((channel(0)?, channel(2)?, channel(4)?))
 }

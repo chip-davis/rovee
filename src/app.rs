@@ -12,8 +12,11 @@ use tui_color_picker::RectState;
 
 use crate::devices::AppDevice;
 use crate::input::TextInput;
-use crate::store::{self, SavedDevice};
+use crate::store::{self, Rgb, SavedDevice};
 use crate::ui;
+
+/// Favorites map to keys 1-9.
+pub const MAX_FAVORITES: usize = 9;
 
 pub enum Mode {
     Normal,
@@ -23,7 +26,6 @@ pub enum Mode {
 
 pub struct ColorPicker {
     pub wheel: RectState,
-    pub picked: Option<(u8, u8, u8)>,
 }
 
 pub struct App {
@@ -33,14 +35,18 @@ pub struct App {
     pub mode: Mode,
     pub path: PathBuf,
     pub running: bool,
+    /// Last color sent from the wheel or a favorite; `p` applies it again.
+    pub last_color: Option<Rgb>,
+    pub favorites: Vec<Rgb>,
 }
 
 impl App {
     pub async fn new() -> Result<Self> {
         let path = store::config_path();
+        let saved = store::load(&path).await?;
 
-        let mut devices: Vec<AppDevice> = store::load(&path)
-            .await?
+        let mut devices: Vec<AppDevice> = saved
+            .devices
             .into_iter()
             .map(AppDevice::from_saved)
             .collect();
@@ -56,6 +62,8 @@ impl App {
             mode: Mode::Normal,
             path,
             running: true,
+            last_color: None,
+            favorites: saved.favorites,
         };
         app.save().await?;
         Ok(app)
@@ -75,7 +83,7 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
-        let Mode::ChangingColor(ref mut picker) = self.mode else {
+        let Mode::ChangingColor(ref picker) = self.mode else {
             return Ok(());
         };
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
@@ -90,9 +98,7 @@ impl App {
         let TuiColor::Rgb(r, g, b) = picker.wheel.color(mouse.column, mouse.row) else {
             return Ok(());
         };
-        picker.picked = Some((r, g, b));
-        self.set_selected_color(govee::types::Color::new(r, g, b))
-            .await
+        self.apply_color((r, g, b)).await
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -102,13 +108,18 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.selected.select_next(),
                 KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
                 KeyCode::Char(' ') => self.toggle_selected().await?,
+                KeyCode::Char('m') => self.toggle_mark(),
                 KeyCode::Char('r') => self.start_rename(),
                 KeyCode::Char('w') => self.start_color_picker(),
+                KeyCode::Char('p') => self.apply_last_color().await?,
+                KeyCode::Char(c @ '1'..='9') => self.apply_favorite(c).await?,
                 _ => {}
             },
 
             Mode::ChangingColor(_) => match key.code {
                 KeyCode::Esc => self.mode = Mode::Normal,
+                KeyCode::Char('f') => self.save_favorite().await?,
+                KeyCode::Char(c @ '1'..='9') => self.apply_favorite(c).await?,
                 _ => {}
             },
 
@@ -147,21 +158,82 @@ impl App {
         Ok(())
     }
 
-    fn start_color_picker(&mut self) {
-        if self.selected_device().is_some() {
-            self.mode = Mode::ChangingColor(ColorPicker {
-                wheel: RectState::new_with_white(1.0),
-                picked: None,
-            });
+    fn toggle_mark(&mut self) {
+        if let Some(d) = self
+            .selected
+            .selected()
+            .and_then(|i| self.devices.get_mut(i))
+        {
+            d.marked = !d.marked;
         }
     }
 
-    async fn set_selected_color(&self, color: govee::types::Color) -> Result<()> {
-        let Some(live) = self.selected_device().and_then(|d| d.live.as_ref()) else {
-            return Ok(()); // offline: nothing to send
-        };
-        self.backend.set_color(&live.id, color).await?;
+    /// Which lights a color action goes to: every marked light, or the
+    /// selected one if nothing is marked.
+    pub fn color_targets(&self) -> Vec<usize> {
+        let marked: Vec<usize> = (0..self.devices.len())
+            .filter(|&i| self.devices[i].marked)
+            .collect();
+        if !marked.is_empty() {
+            return marked;
+        }
+        self.selected
+            .selected()
+            .filter(|&i| i < self.devices.len())
+            .into_iter()
+            .collect()
+    }
+
+    /// Send a color to the current targets and remember it as the last color.
+    async fn apply_color(&mut self, rgb: Rgb) -> Result<()> {
+        self.last_color = Some(rgb);
+        let (r, g, b) = rgb;
+        for i in self.color_targets() {
+            if let Some(live) = &self.devices[i].live {
+                self.backend
+                    .set_color(&live.id, govee::types::Color::new(r, g, b))
+                    .await?;
+            }
+            // offline: nothing to send
+        }
         Ok(())
+    }
+
+    async fn apply_last_color(&mut self) -> Result<()> {
+        match self.last_color {
+            Some(rgb) => self.apply_color(rgb).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn apply_favorite(&mut self, key: char) -> Result<()> {
+        let Some(n) = key.to_digit(10) else {
+            return Ok(());
+        };
+        match self.favorites.get(n as usize - 1) {
+            Some(&rgb) => self.apply_color(rgb).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Save the last color as a favorite (skipping duplicates and once full).
+    async fn save_favorite(&mut self) -> Result<()> {
+        let Some(rgb) = self.last_color else {
+            return Ok(());
+        };
+        if self.favorites.contains(&rgb) || self.favorites.len() >= MAX_FAVORITES {
+            return Ok(());
+        }
+        self.favorites.push(rgb);
+        self.save().await
+    }
+
+    fn start_color_picker(&mut self) {
+        if !self.color_targets().is_empty() {
+            self.mode = Mode::ChangingColor(ColorPicker {
+                wheel: RectState::new_with_white(1.0),
+            });
+        }
     }
 
     fn start_rename(&mut self) {
@@ -191,6 +263,6 @@ impl App {
 
     async fn save(&self) -> Result<()> {
         let saved: Vec<SavedDevice> = self.devices.iter().map(|d| d.saved.clone()).collect();
-        store::save(&self.path, &saved).await
+        store::save(&self.path, &saved, &self.favorites).await
     }
 }

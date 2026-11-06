@@ -8,6 +8,7 @@ pub struct AppDevice {
     pub saved: SavedDevice,
     pub live: Option<Device>,
     pub on: bool,
+    pub marked: bool,
 }
 
 impl AppDevice {
@@ -16,6 +17,7 @@ impl AppDevice {
             saved,
             live: None,
             on: false,
+            marked: false,
         }
     }
 
@@ -37,6 +39,7 @@ pub async fn merge(backend: &LocalBackend, devices: &mut Vec<AppDevice>, found: 
                 },
                 live: Some(f),
                 on: false,
+                marked: false,
             }),
         }
     }
