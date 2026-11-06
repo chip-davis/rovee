@@ -8,6 +8,7 @@ use crossterm::event::{
 };
 use govee::backend::GoveeBackend;
 use govee::backend::local::LocalBackend;
+use govee::scene::{SceneColor, SceneRegistry};
 use ratatui::{
     DefaultTerminal,
     layout::{Position, Rect},
@@ -18,7 +19,7 @@ use tui_color_picker::RectState;
 
 use crate::devices::AppDevice;
 use crate::input::TextInput;
-use crate::store::{self, Rgb, SavedDevice, SavedGroup};
+use crate::store::{self, Rgb, SavedDevice, SavedGroup, SavedScene, to_hex};
 use crate::ui;
 
 /// Favorites map to keys 1-9.
@@ -41,6 +42,36 @@ pub enum Mode {
     ChangingTemp(ColorTemp),
     Grouping(GroupMenu),
     NamingGroup { input: TextInput, device: usize },
+    Scenes(SceneMenu),
+    NamingScene(TextInput),
+}
+
+pub struct SceneMenu {
+    pub list: ListState,
+}
+
+#[derive(Clone)]
+pub struct SceneEntry {
+    pub name: String,
+    pub brightness: u8,
+    pub color: SceneColor,
+    pub builtin: bool,
+}
+
+impl SceneEntry {
+    fn from_saved(s: &SavedScene) -> Option<Self> {
+        let color = match (s.kelvin, s.rgb()) {
+            (Some(k), _) => SceneColor::Temp(k),
+            (None, Some((r, g, b))) => SceneColor::Rgb(govee::types::Color::new(r, g, b)),
+            (None, None) => return None,
+        };
+        Some(Self {
+            name: s.name.clone(),
+            brightness: s.brightness,
+            color,
+            builtin: false,
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,15 +100,17 @@ pub enum Field {
     Power,
     Mode,
     Brightness,
+    Scene,
 }
 
 impl Field {
-    pub const ALL: [Field; 5] = [
+    pub const ALL: [Field; 6] = [
         Field::Name,
         Field::Color,
         Field::Power,
         Field::Mode,
         Field::Brightness,
+        Field::Scene,
     ];
 
     fn step(self, down: bool) -> Field {
@@ -141,6 +174,7 @@ pub struct App {
     pub backend: LocalBackend,
     pub devices: Vec<AppDevice>,
     pub groups: Vec<SavedGroup>,
+    pub user_scenes: Vec<SavedScene>,
     pub selected: ListState,
     pub mode: Mode,
     pub focus: Focus,
@@ -174,6 +208,7 @@ impl App {
             backend,
             devices,
             groups: saved.groups,
+            user_scenes: saved.scenes,
             selected: ListState::default().with_selected(Some(0)),
             mode: Mode::Normal,
             focus: Focus::List,
@@ -282,6 +317,7 @@ impl App {
             KeyCode::Char('s') | KeyCode::F(5) => self.scanning = true,
             KeyCode::Char('w') => self.start_color_picker(),
             KeyCode::Char('t') => self.start_temp_picker(),
+            KeyCode::Char('c') => self.start_scene_menu(),
             KeyCode::Char('p') => self.apply_last_color().await?,
             KeyCode::Char('+') | KeyCode::Char('=') => self.step_brightness(true).await?,
             KeyCode::Char('-') | KeyCode::Char('_') => self.step_brightness(false).await?,
@@ -324,6 +360,7 @@ impl App {
             Field::Mode => self.start_temp_picker(),
             Field::Power => self.toggle_selected().await?,
             Field::Brightness => {}
+            Field::Scene => self.start_scene_menu(),
         }
         Ok(())
     }
@@ -396,6 +433,39 @@ impl App {
                             device,
                         };
                     }
+                }
+                _ => {}
+            },
+
+            Mode::Scenes(ref mut menu) => match key.code {
+                KeyCode::Esc => self.mode = Mode::Normal,
+                KeyCode::Down | KeyCode::Char('j') => menu.list.select_next(),
+                KeyCode::Up | KeyCode::Char('k') => menu.list.select_previous(),
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let choice = menu.list.selected().unwrap_or(0);
+                    let scenes = self.scenes();
+                    match scenes.get(choice) {
+                        Some(scene) => self.apply_scene(scene.clone()).await?,
+                        None => self.mode = Mode::NamingScene(TextInput::new(String::new())),
+                    }
+                }
+                KeyCode::Char('d') => {
+                    let choice = menu.list.selected().unwrap_or(0);
+                    self.delete_scene(choice).await?;
+                }
+                _ => {}
+            },
+
+            Mode::NamingScene(ref mut input) => match key.code {
+                KeyCode::Char(c) => input.insert(c),
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Left => input.left(),
+                KeyCode::Right => input.right(),
+                KeyCode::Esc => self.mode = Mode::Normal,
+                KeyCode::Enter => {
+                    let name = input.value.clone();
+                    self.mode = Mode::Normal;
+                    self.save_scene(&name).await?;
                 }
                 _ => {}
             },
@@ -636,14 +706,125 @@ impl App {
         if next == current {
             return Ok(());
         }
+        self.set_brightness(next).await
+    }
 
-        for i in targets {
+    async fn set_brightness(&mut self, value: u8) -> Result<()> {
+        for i in self.color_targets() {
             if let Some(live) = &self.devices[i].live {
-                self.backend.set_brightness(&live.id, next).await?;
-                self.devices[i].brightness = Some(next);
+                self.backend.set_brightness(&live.id, value).await?;
+                self.devices[i].brightness = Some(value);
             }
         }
         Ok(())
+    }
+
+    pub fn scenes(&self) -> Vec<SceneEntry> {
+        let mut scenes: Vec<SceneEntry> = SceneRegistry::new()
+            .list()
+            .into_iter()
+            .map(|s| SceneEntry {
+                name: s.name().to_string(),
+                brightness: s.brightness(),
+                color: *s.color(),
+                builtin: true,
+            })
+            .collect();
+        for entry in self.user_scenes.iter().filter_map(SceneEntry::from_saved) {
+            match scenes
+                .iter()
+                .position(|s| s.name.eq_ignore_ascii_case(&entry.name))
+            {
+                Some(pos) => scenes[pos] = entry,
+                None => scenes.push(entry),
+            }
+        }
+        scenes
+    }
+
+    pub fn current_scene(&self) -> Option<String> {
+        let &first = self.color_targets().first()?;
+        let d = &self.devices[first];
+        if !d.online() || !d.on {
+            return None;
+        }
+        self.scenes()
+            .into_iter()
+            .find(|s| {
+                d.brightness == Some(s.brightness.clamp(MIN_BRIGHTNESS, MAX_BRIGHTNESS))
+                    && match s.color {
+                        SceneColor::Temp(k) => d.kelvin == Some(k.clamp(MIN_KELVIN, MAX_KELVIN)),
+                        SceneColor::Rgb(c) => {
+                            d.kelvin.is_none() && d.color == Some((c.r, c.g, c.b))
+                        }
+                    }
+            })
+            .map(|s| s.name)
+    }
+
+    fn start_scene_menu(&mut self) {
+        if !self.color_targets().is_empty() {
+            self.mode = Mode::Scenes(SceneMenu {
+                list: ListState::default().with_selected(Some(0)),
+            });
+        }
+    }
+
+    async fn apply_scene(&mut self, scene: SceneEntry) -> Result<()> {
+        match scene.color {
+            SceneColor::Rgb(c) => self.apply_color((c.r, c.g, c.b)).await?,
+            SceneColor::Temp(k) => self.apply_temp(k.clamp(MIN_KELVIN, MAX_KELVIN)).await?,
+        }
+        self.set_brightness(scene.brightness.clamp(MIN_BRIGHTNESS, MAX_BRIGHTNESS))
+            .await
+    }
+
+    async fn save_scene(&mut self, raw: &str) -> Result<()> {
+        let name: String = raw
+            .trim()
+            .chars()
+            .map(|c| if c.is_whitespace() { '-' } else { c })
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if name.is_empty() {
+            return Ok(());
+        }
+        let Some(&first) = self.color_targets().first() else {
+            return Ok(());
+        };
+        let d = &self.devices[first];
+        let (color, kelvin) = match (d.kelvin, d.color) {
+            (Some(k), _) => (None, Some(k)),
+            (None, Some(c)) => (Some(to_hex(c)), None),
+            (None, None) => return Ok(()),
+        };
+        let scene = SavedScene {
+            name,
+            brightness: d.brightness.unwrap_or(MAX_BRIGHTNESS),
+            color,
+            kelvin,
+        };
+        match self
+            .user_scenes
+            .iter()
+            .position(|s| s.name.eq_ignore_ascii_case(&scene.name))
+        {
+            Some(pos) => self.user_scenes[pos] = scene,
+            None => self.user_scenes.push(scene),
+        }
+        self.save().await
+    }
+
+    async fn delete_scene(&mut self, index: usize) -> Result<()> {
+        let Some(scene) = self.scenes().into_iter().nth(index) else {
+            return Ok(());
+        };
+        if scene.builtin {
+            return Ok(());
+        }
+        self.user_scenes
+            .retain(|s| !s.name.eq_ignore_ascii_case(&scene.name));
+        self.save().await
     }
 
     async fn apply_temp(&mut self, kelvin: u32) -> Result<()> {
@@ -703,6 +884,13 @@ impl App {
 
     async fn save(&self) -> Result<()> {
         let saved: Vec<SavedDevice> = self.devices.iter().map(|d| d.saved.clone()).collect();
-        store::save(&self.path, &saved, &self.groups, &self.favorites).await
+        store::save(
+            &self.path,
+            &saved,
+            &self.groups,
+            &self.user_scenes,
+            &self.favorites,
+        )
+        .await
     }
 }

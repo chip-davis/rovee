@@ -21,10 +21,27 @@ pub struct SavedGroup {
     pub collapsed: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SavedScene {
+    pub name: String,
+    pub brightness: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kelvin: Option<u32>,
+}
+
+impl SavedScene {
+    pub fn rgb(&self) -> Option<Rgb> {
+        self.color.as_deref().and_then(parse_hex)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SavedData {
     pub devices: Vec<SavedDevice>,
     pub groups: Vec<SavedGroup>,
+    pub scenes: Vec<SavedScene>,
     pub favorites: Vec<Rgb>,
 }
 
@@ -36,6 +53,8 @@ struct SavedFile {
     device: Vec<SavedDevice>,
     #[serde(default)]
     group: Vec<SavedGroup>,
+    #[serde(default)]
+    scene: Vec<SavedScene>,
 }
 
 /// `~/.config/rovee/devices.toml`
@@ -55,6 +74,7 @@ pub async fn load(path: &Path) -> Result<SavedData> {
     Ok(SavedData {
         devices: file.device,
         groups: file.group,
+        scenes: file.scene,
         favorites: file.favorites.iter().filter_map(|s| parse_hex(s)).collect(),
     })
 }
@@ -63,12 +83,14 @@ pub async fn save(
     path: &Path,
     devices: &[SavedDevice],
     groups: &[SavedGroup],
+    scenes: &[SavedScene],
     favorites: &[Rgb],
 ) -> Result<()> {
     let file = SavedFile {
         favorites: favorites.iter().map(|&c| to_hex(c)).collect(),
         device: devices.to_vec(),
         group: groups.to_vec(),
+        scene: scenes.to_vec(),
     };
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;

@@ -8,9 +8,11 @@ use ratatui::{
 
 use tui_color_picker::ColorWheel;
 
+use govee::scene::SceneColor;
+
 use crate::app::{
-    App, Branch, ColorPicker, ColorTemp, Field, Focus, GroupMenu, Mode, Row, kelvin_for_offset,
-    offset_for_kelvin,
+    App, Branch, ColorPicker, ColorTemp, Field, Focus, GroupMenu, Mode, Row, SceneEntry,
+    SceneMenu, kelvin_for_offset, offset_for_kelvin,
 };
 use crate::devices::AppDevice;
 use crate::input::TextInput;
@@ -99,6 +101,17 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
     if let Mode::Grouping(menu) = &mut app.mode {
         render_group_menu(menu, &app.groups, &app.devices, frame);
+    }
+    if let Mode::NamingScene(input) = &app.mode {
+        render_text_popup(input, "save scene as", frame);
+    }
+    if matches!(app.mode, Mode::Scenes(_)) {
+        let scenes = app.scenes();
+        let current = app.current_scene();
+        let target = target_label(app);
+        if let Mode::Scenes(menu) = &mut app.mode {
+            render_scene_menu(menu, &scenes, current.as_deref(), &target, frame);
+        }
     }
 
     if inline {
@@ -448,19 +461,30 @@ fn render_card(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 
     let color_rows = if temp_open { TEMP_ROWS } else { SWATCH_ROWS };
-    let [name_row, _, color_area, _, power_row, mode_row, bright_row, _, extra_area] =
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(color_rows),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .areas(inner);
+    let [
+        name_row,
+        _,
+        color_area,
+        _,
+        power_row,
+        mode_row,
+        bright_row,
+        scene_row,
+        _,
+        extra_area,
+    ] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(color_rows),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
 
     render_name_row(app, &card, frame, name_row, label("name", Field::Name), focused);
 
@@ -501,6 +525,14 @@ fn render_card(app: &mut App, frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new(row(label("bright", Field::Brightness), bright)),
         bright_row,
+    );
+    let scene = match app.current_scene() {
+        Some(name) => Span::raw(name).fg(FG),
+        None => Span::raw("--").fg(DIM),
+    };
+    frame.render_widget(
+        Paragraph::new(row(label("scene", Field::Scene), vec![scene])),
+        scene_row,
     );
 
     frame.render_widget(Paragraph::new(card.extra), extra_area);
@@ -607,6 +639,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
             ("d", "delete"),
             ("w", "wheel"),
             ("t", "white"),
+            ("c", "scenes"),
             ("p", "last"),
             ("1-9", "favorite"),
             ("r", "rename"),
@@ -621,6 +654,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
                 Field::Mode => keys.push(("enter", "white")),
                 Field::Power => keys.push(("enter", "toggle")),
                 Field::Brightness => keys.push(("←→", "adjust")),
+                Field::Scene => keys.push(("enter", "scenes")),
             }
             keys.extend([("p", "last"), ("1-9", "favorite"), ("tab", "list"), ("q", "quit")]);
             keys
@@ -640,6 +674,13 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         ],
         (Mode::Grouping(_), _) => vec![("↑↓", "select"), ("enter", "toggle"), ("esc", "close")],
         (Mode::NamingGroup { .. }, _) => vec![("enter", "create"), ("esc", "cancel")],
+        (Mode::Scenes(_), _) => vec![
+            ("↑↓", "select"),
+            ("enter", "apply"),
+            ("d", "delete"),
+            ("esc", "close"),
+        ],
+        (Mode::NamingScene(_), _) => vec![("enter", "save"), ("esc", "cancel")],
     };
     let spans: Vec<Span> = keys
         .iter()
@@ -708,6 +749,64 @@ fn render_group_menu(
             popup(&format!("groups · {}", device.saved.name), rgb(PURPLE))
                 .padding(Padding::new(1, 1, 1, 0)),
         )
+        .highlight_style(Style::new().bg(LINE))
+        .highlight_symbol(Line::from("▌").fg(rgb(ACCENT)));
+
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(list, area, &mut menu.list);
+}
+
+fn scene_rgb(scene: &SceneEntry) -> Rgb {
+    match scene.color {
+        SceneColor::Rgb(c) => (c.r, c.g, c.b),
+        SceneColor::Temp(k) => kelvin_to_rgb(k),
+    }
+}
+
+fn render_scene_menu(
+    menu: &mut SceneMenu,
+    scenes: &[SceneEntry],
+    current: Option<&str>,
+    target: &str,
+    frame: &mut Frame,
+) {
+    let mut items: Vec<ListItem> = scenes
+        .iter()
+        .map(|s| {
+            let setting = match s.color {
+                SceneColor::Rgb(c) => to_hex((c.r, c.g, c.b)),
+                SceneColor::Temp(k) => format!("{k}K"),
+            };
+            let active = current.is_some_and(|c| c.eq_ignore_ascii_case(&s.name));
+            let name_style = if active {
+                Style::new().fg(rgb(ACCENT)).bold()
+            } else {
+                Style::new().fg(FG)
+            };
+            let mut spans = vec![
+                swatch(scene_rgb(s), 2),
+                Span::raw("  "),
+                Span::styled(format!("{:<14}", s.name), name_style),
+                Span::raw(format!("{setting:<9}")).fg(MUTED),
+                Span::raw(format!("{:>4}%", s.brightness)).fg(MUTED),
+            ];
+            if s.builtin {
+                spans.push(Span::raw("  built-in").fg(DIM));
+            }
+            if active {
+                spans.push(Span::raw("  ●").fg(rgb(ACCENT)));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    items.push(ListItem::new(
+        Line::from(" +  save current as scene").fg(rgb(ACCENT)),
+    ));
+
+    let height = (items.len() as u16 + 4).min(frame.area().height);
+    let area = popup_area(frame.area(), RENAME_WIDTH + 8, height);
+    let list = List::new(items)
+        .block(popup(&format!("scenes · {target}"), rgb(WARM)).padding(Padding::new(1, 1, 1, 0)))
         .highlight_style(Style::new().bg(LINE))
         .highlight_symbol(Line::from("▌").fg(rgb(ACCENT)));
 
