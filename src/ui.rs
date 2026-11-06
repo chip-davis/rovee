@@ -8,7 +8,10 @@ use ratatui::{
 
 use tui_color_picker::ColorWheel;
 
-use crate::app::{App, ColorPicker, ColorTemp, Mode, kelvin_for_offset, offset_for_kelvin};
+use crate::app::{
+    App, ColorPicker, ColorTemp, GroupMenu, Mode, Row, kelvin_for_offset, offset_for_kelvin,
+};
+use crate::store::SavedGroup;
 use crate::devices::AppDevice;
 use crate::input::TextInput;
 use crate::store::{Rgb, to_hex};
@@ -79,7 +82,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_footer(&app.mode, frame, footer);
 
     if let Mode::Renaming(input) = &app.mode {
-        render_rename_popup(input, frame);
+        render_text_popup(input, "rename", frame);
+    }
+    if let Mode::NamingGroup { input, .. } = &app.mode {
+        render_text_popup(input, "new group", frame);
+    }
+    if let Mode::Grouping(menu) = &mut app.mode {
+        render_group_menu(menu, &app.groups, &app.devices, frame);
     }
 
     let target = target_label(app);
@@ -181,56 +190,79 @@ fn device_status(d: &AppDevice) -> Span<'static> {
 }
 
 fn target_label(app: &App) -> String {
-    let targets = app.color_targets();
-    let marked = app.devices.iter().filter(|d| d.marked).count();
-    match (marked, targets.first()) {
-        (0, Some(&i)) => app.devices[i].saved.name.clone(),
-        (0, None) => String::new(),
-        (n, _) => format!("{n} marked"),
+    match app.selected_row() {
+        Some(Row::Group(g)) => app.groups[g].name.clone(),
+        Some(Row::Device(i)) => app.devices[i].saved.name.clone(),
+        None => String::new(),
     }
+}
+
+fn device_dot(d: &AppDevice) -> Span<'static> {
+    match (d.online(), d.on) {
+        (false, _) => Span::raw("?").fg(DIM),
+        (true, false) => Span::raw("○").fg(MUTED),
+        (true, true) => Span::raw("●").fg(device_rgb(d).map(rgb).unwrap_or(GREEN)),
+    }
+}
+
+fn group_item(app: &App, g: usize) -> ListItem<'static> {
+    let members = app.group_members(g);
+    let on = members.iter().filter(|&&i| app.devices[i].on).count();
+    let title = Line::from(vec![
+        Span::raw("  "),
+        Span::raw("▣").fg(rgb(PURPLE)),
+        Span::raw("  "),
+        Span::raw(app.groups[g].name.clone()).fg(rgb(PURPLE)).bold(),
+    ]);
+    let mut detail = vec![
+        Span::raw("     "),
+        Span::raw(format!("{} lights", members.len())).fg(DIM),
+        Span::raw("  ·  ").fg(DIM),
+    ];
+    if members.is_empty() {
+        detail.push(Span::raw("empty · press g on a light to add it").fg(DIM));
+    } else {
+        detail.extend(members.iter().map(|&i| device_dot(&app.devices[i])));
+        detail.push(Span::raw(format!("  {on}/{} on", members.len())).fg(MUTED));
+    }
+    ListItem::new(vec![title, Line::from(detail), Line::default()])
+}
+
+fn device_item(d: &AppDevice) -> ListItem<'static> {
+    let name_style = if d.online() {
+        Style::new().fg(FG).bold()
+    } else {
+        Style::new().fg(DIM)
+    };
+    let title = Line::from(vec![
+        Span::raw("  "),
+        device_dot(d),
+        Span::raw("  "),
+        Span::styled(d.saved.name.clone(), name_style),
+    ]);
+    let mut detail_spans = vec![
+        Span::raw("     "),
+        Span::raw(d.saved.model.clone()).fg(DIM),
+        Span::raw("  ·  ").fg(DIM),
+        device_status(d),
+    ];
+    if d.online()
+        && d.on
+        && let Some(b) = d.brightness
+    {
+        detail_spans.push(Span::raw("  ·  ").fg(DIM));
+        detail_spans.push(Span::raw(format!("{b}%")).fg(MUTED));
+    }
+    ListItem::new(vec![title, Line::from(detail_spans), Line::default()])
 }
 
 fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = app
-        .devices
-        .iter()
-        .map(|d| {
-            let mark = if d.marked {
-                Span::raw("✓ ").fg(rgb(ACCENT)).bold()
-            } else {
-                Span::raw("  ")
-            };
-            let dot = match (d.online(), d.on) {
-                (false, _) => Span::raw("?").fg(DIM),
-                (true, false) => Span::raw("○").fg(MUTED),
-                (true, true) => Span::raw("●").fg(device_rgb(d).map(rgb).unwrap_or(GREEN)),
-            };
-            let name_style = if d.online() {
-                Style::new().fg(FG).bold()
-            } else {
-                Style::new().fg(DIM)
-            };
-            let title = Line::from(vec![
-                mark,
-                dot,
-                Span::raw("  "),
-                Span::styled(d.saved.name.clone(), name_style),
-            ]);
-            let mut detail_spans = vec![
-                Span::raw("     "),
-                Span::raw(d.saved.model.clone()).fg(DIM),
-                Span::raw("  ·  ").fg(DIM),
-                device_status(d),
-            ];
-            if d.online()
-                && d.on
-                && let Some(b) = d.brightness
-            {
-                detail_spans.push(Span::raw("  ·  ").fg(DIM));
-                detail_spans.push(Span::raw(format!("{b}%")).fg(MUTED));
-            }
-            let detail = Line::from(detail_spans);
-            ListItem::new(vec![title, detail, Line::default()])
+        .rows()
+        .into_iter()
+        .map(|row| match row {
+            Row::Group(g) => group_item(app, g),
+            Row::Device(i) => device_item(&app.devices[i]),
         })
         .collect();
 
@@ -247,11 +279,73 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_details(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(d) = app.selected.selected().and_then(|i| app.devices.get(i)) else {
-        frame.render_widget(panel("details"), area);
-        return;
-    };
+    match app.selected_row() {
+        Some(Row::Group(g)) => render_group_details(app, g, frame, area),
+        Some(Row::Device(i)) => render_device_details(&app.devices[i], frame, area),
+        None => frame.render_widget(panel("details"), area),
+    }
+}
 
+fn render_group_details(app: &App, g: usize, frame: &mut Frame, area: Rect) {
+    let members = app.group_members(g);
+    let block = panel(&app.groups[g].name)
+        .border_style(Style::new().fg(rgb(PURPLE)))
+        .padding(Padding::new(2, 2, 1, 0));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if members.is_empty() {
+        let hint = vec![
+            Line::from("no lights in this group yet").fg(MUTED),
+            Line::default(),
+            Line::from("select a light and press g to add it").fg(DIM),
+        ];
+        frame.render_widget(Paragraph::new(hint), inner);
+        return;
+    }
+
+    let [swatch_area, _, list_area] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    let width = swatch_area.width as usize;
+    let cell = (width / members.len()).max(1);
+    let strip: Line = members
+        .iter()
+        .enumerate()
+        .map(|(n, &i)| {
+            let w = if n + 1 == members.len() {
+                width.saturating_sub(cell * n)
+            } else {
+                cell
+            };
+            match device_rgb(&app.devices[i]) {
+                Some(c) => swatch(c, w),
+                None => Span::raw("░".repeat(w)).fg(LINE),
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(vec![strip.clone(), strip.clone(), strip]), swatch_area);
+
+    let lines: Vec<Line> = members
+        .iter()
+        .map(|&i| {
+            let d = &app.devices[i];
+            Line::from(vec![
+                device_dot(d),
+                Span::raw("  "),
+                Span::raw(format!("{:<16}", d.saved.name)).fg(FG),
+                device_status(d),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+fn render_device_details(d: &AppDevice, frame: &mut Frame, area: Rect) {
     let color = device_rgb(d);
     let block = panel(&d.saved.name)
         .border_style(Style::new().fg(color.map(rgb).unwrap_or(DIM)))
@@ -282,7 +376,7 @@ fn render_details(app: &App, frame: &mut Frame, area: Rect) {
         (true, true) => Span::raw("on").fg(GREEN),
         (true, false) => Span::raw("off").fg(MUTED),
     };
-    let mut info = vec![
+    let info = vec![
         row("power", power),
         row("mode", device_status(d)),
         Line::from(
@@ -294,9 +388,6 @@ fn render_details(app: &App, frame: &mut Frame, area: Rect) {
         row("model", Span::raw(d.saved.model.clone()).fg(FG)),
         row("id", Span::raw(d.saved.id.clone()).fg(MUTED)),
     ];
-    if d.marked {
-        info.push(row("marked", Span::raw("yes").fg(rgb(ACCENT))));
-    }
     frame.render_widget(Paragraph::new(info), info_area);
 }
 
@@ -348,7 +439,8 @@ fn render_footer(mode: &Mode, frame: &mut Frame, area: Rect) {
             ("↑↓", "select"),
             ("space", "power"),
             ("+/-", "brightness"),
-            ("m", "mark"),
+            ("g", "group"),
+            ("d", "delete group"),
             ("w", "wheel"),
             ("t", "white"),
             ("p", "last"),
@@ -370,6 +462,8 @@ fn render_footer(mode: &Mode, frame: &mut Frame, area: Rect) {
             ("drag", "set"),
             ("esc", "close"),
         ],
+        Mode::Grouping(_) => &[("↑↓", "select"), ("enter", "toggle"), ("esc", "close")],
+        Mode::NamingGroup { .. } => &[("enter", "create"), ("esc", "cancel")],
     };
     let spans: Vec<Span> = keys
         .iter()
@@ -390,16 +484,56 @@ fn popup(title: &str, border: Color) -> Block<'static> {
         .title(Line::from(format!(" {title} ")).fg(FG).bold())
 }
 
-fn render_rename_popup(input: &TextInput, frame: &mut Frame) {
+fn render_text_popup(input: &TextInput, title: &str, frame: &mut Frame) {
     let area = popup_area(frame.area(), RENAME_WIDTH, RENAME_HEIGHT);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(input.value.as_str())
             .fg(FG)
-            .block(popup("rename", rgb(ACCENT)).padding(Padding::horizontal(1))),
+            .block(popup(title, rgb(ACCENT)).padding(Padding::horizontal(1))),
         area,
     );
     frame.set_cursor_position(Position::new(area.x + 2 + input.cursor as u16, area.y + 1));
+}
+
+fn render_group_menu(
+    menu: &mut GroupMenu,
+    groups: &[SavedGroup],
+    devices: &[AppDevice],
+    frame: &mut Frame,
+) {
+    let device = &devices[menu.device];
+    let mut items: Vec<ListItem> = groups
+        .iter()
+        .map(|g| {
+            let member = g.members.contains(&device.saved.id);
+            let check = if member {
+                Span::raw("[✓]").fg(rgb(PURPLE)).bold()
+            } else {
+                Span::raw("[ ]").fg(DIM)
+            };
+            ListItem::new(Line::from(vec![
+                check,
+                Span::raw("  "),
+                Span::raw(g.name.clone()).fg(FG),
+                Span::raw(format!("  {}", g.members.len())).fg(DIM),
+            ]))
+        })
+        .collect();
+    items.push(ListItem::new(Line::from(" +   new group").fg(rgb(ACCENT))));
+
+    let height = (items.len() as u16 + 4).min(frame.area().height);
+    let area = popup_area(frame.area(), RENAME_WIDTH, height);
+    let list = List::new(items)
+        .block(
+            popup(&format!("groups · {}", device.saved.name), rgb(PURPLE))
+                .padding(Padding::new(1, 1, 1, 0)),
+        )
+        .highlight_style(Style::new().bg(LINE))
+        .highlight_symbol(Line::from("▌").fg(rgb(ACCENT)));
+
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(list, area, &mut menu.list);
 }
 
 fn popup_area(area: Rect, width: u16, height: u16) -> Rect {

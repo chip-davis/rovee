@@ -18,7 +18,7 @@ use tui_color_picker::RectState;
 
 use crate::devices::AppDevice;
 use crate::input::TextInput;
-use crate::store::{self, Rgb, SavedDevice};
+use crate::store::{self, Rgb, SavedDevice, SavedGroup};
 use crate::ui;
 
 /// Favorites map to keys 1-9.
@@ -39,6 +39,19 @@ pub enum Mode {
     Renaming(TextInput),
     ChangingColor(ColorPicker),
     ChangingTemp(ColorTemp),
+    Grouping(GroupMenu),
+    NamingGroup { input: TextInput, device: usize },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    Group(usize),
+    Device(usize),
+}
+
+pub struct GroupMenu {
+    pub list: ListState,
+    pub device: usize,
 }
 
 pub struct ColorTemp {
@@ -85,6 +98,7 @@ pub struct ColorPicker {
 pub struct App {
     pub backend: LocalBackend,
     pub devices: Vec<AppDevice>,
+    pub groups: Vec<SavedGroup>,
     pub selected: ListState,
     pub mode: Mode,
     pub path: PathBuf,
@@ -113,6 +127,7 @@ impl App {
         let app = Self {
             backend,
             devices,
+            groups: saved.groups,
             selected: ListState::default().with_selected(Some(0)),
             mode: Mode::Normal,
             path,
@@ -191,7 +206,8 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.selected.select_next(),
                 KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
                 KeyCode::Char(' ') => self.toggle_selected().await?,
-                KeyCode::Char('m') => self.toggle_mark(),
+                KeyCode::Char('g') => self.start_grouping(),
+                KeyCode::Char('d') => self.delete_selected_group().await?,
                 KeyCode::Char('r') => self.start_rename(),
                 KeyCode::Char('s') | KeyCode::F(5) => self.scanning = true,
                 KeyCode::Char('w') => self.start_color_picker(),
@@ -248,52 +264,150 @@ impl App {
                 }
                 _ => {}
             },
+
+            Mode::Grouping(ref mut menu) => match key.code {
+                KeyCode::Esc => self.mode = Mode::Normal,
+                KeyCode::Down | KeyCode::Char('j') => menu.list.select_next(),
+                KeyCode::Up | KeyCode::Char('k') => menu.list.select_previous(),
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let device = menu.device;
+                    let choice = menu.list.selected().unwrap_or(0);
+                    if choice < self.groups.len() {
+                        self.toggle_membership(choice, device).await?;
+                    } else {
+                        self.mode = Mode::NamingGroup {
+                            input: TextInput::new(String::new()),
+                            device,
+                        };
+                    }
+                }
+                _ => {}
+            },
+
+            Mode::NamingGroup {
+                ref mut input,
+                device,
+            } => match key.code {
+                KeyCode::Char(c) => input.insert(c),
+                KeyCode::Backspace => input.backspace(),
+                KeyCode::Left => input.left(),
+                KeyCode::Right => input.right(),
+                KeyCode::Esc => self.mode = Mode::Normal,
+                KeyCode::Enter => {
+                    let name = input.value.trim().to_string();
+                    self.mode = Mode::Normal;
+                    self.create_group(name, device).await?;
+                }
+                _ => {}
+            },
         }
         Ok(())
+    }
+
+    pub fn rows(&self) -> Vec<Row> {
+        (0..self.groups.len())
+            .map(Row::Group)
+            .chain((0..self.devices.len()).map(Row::Device))
+            .collect()
+    }
+
+    pub fn selected_row(&self) -> Option<Row> {
+        let i = self.selected.selected()?;
+        self.rows().get(i).copied()
+    }
+
+    fn select_row(&mut self, row: Row) {
+        if let Some(i) = self.rows().iter().position(|&r| r == row) {
+            self.selected.select(Some(i));
+        }
+    }
+
+    pub fn group_members(&self, group: usize) -> Vec<usize> {
+        let Some(g) = self.groups.get(group) else {
+            return Vec::new();
+        };
+        (0..self.devices.len())
+            .filter(|&i| g.members.contains(&self.devices[i].saved.id))
+            .collect()
+    }
+
+    pub fn color_targets(&self) -> Vec<usize> {
+        match self.selected_row() {
+            Some(Row::Group(g)) => self.group_members(g),
+            Some(Row::Device(i)) => vec![i],
+            None => Vec::new(),
+        }
     }
 
     async fn toggle_selected(&mut self) -> Result<()> {
-        let Some(d) = self
-            .selected
-            .selected()
-            .and_then(|i| self.devices.get_mut(i))
-        else {
+        let targets: Vec<usize> = self
+            .color_targets()
+            .into_iter()
+            .filter(|&i| self.devices[i].online())
+            .collect();
+        if targets.is_empty() {
             return Ok(());
-        };
-        let Some(live) = &d.live else {
-            return Ok(());
-        };
+        }
+        let new_state = !targets.iter().any(|&i| self.devices[i].on);
 
-        let new_state = !d.on;
-        self.backend.set_power(&live.id, new_state).await?;
-        d.on = new_state;
+        for i in targets {
+            if let Some(live) = &self.devices[i].live {
+                self.backend.set_power(&live.id, new_state).await?;
+                self.devices[i].on = new_state;
+            }
+        }
         Ok(())
     }
 
-    fn toggle_mark(&mut self) {
-        if let Some(d) = self
-            .selected
-            .selected()
-            .and_then(|i| self.devices.get_mut(i))
-        {
-            d.marked = !d.marked;
-        }
+    fn start_grouping(&mut self) {
+        let Some(Row::Device(device)) = self.selected_row() else {
+            return;
+        };
+        self.mode = Mode::Grouping(GroupMenu {
+            list: ListState::default().with_selected(Some(0)),
+            device,
+        });
     }
 
-    /// Which lights a color action goes to: every marked light, or the
-    /// selected one if nothing is marked.
-    pub fn color_targets(&self) -> Vec<usize> {
-        let marked: Vec<usize> = (0..self.devices.len())
-            .filter(|&i| self.devices[i].marked)
-            .collect();
-        if !marked.is_empty() {
-            return marked;
+    async fn toggle_membership(&mut self, group: usize, device: usize) -> Result<()> {
+        let id = self.devices[device].saved.id.clone();
+        let members = &mut self.groups[group].members;
+        match members.iter().position(|m| *m == id) {
+            Some(pos) => {
+                members.remove(pos);
+            }
+            None => members.push(id),
         }
-        self.selected
-            .selected()
-            .filter(|&i| i < self.devices.len())
-            .into_iter()
-            .collect()
+        self.save().await
+    }
+
+    async fn create_group(&mut self, name: String, device: usize) -> Result<()> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        let id = self.devices[device].saved.id.clone();
+        match self.groups.iter_mut().find(|g| g.name == name) {
+            Some(g) if !g.members.contains(&id) => g.members.push(id),
+            Some(_) => {}
+            None => self.groups.push(SavedGroup {
+                name,
+                members: vec![id],
+            }),
+        }
+        self.select_row(Row::Device(device));
+        self.save().await
+    }
+
+    async fn delete_selected_group(&mut self) -> Result<()> {
+        let Some(Row::Group(g)) = self.selected_row() else {
+            return Ok(());
+        };
+        self.groups.remove(g);
+        let last = self.rows().len().saturating_sub(1);
+        if let Some(i) = self.selected.selected() {
+            self.selected.select(Some(i.min(last)));
+        }
+        self.save().await
     }
 
     /// Send a color to the current targets and remember it as the last color.
@@ -412,32 +526,28 @@ impl App {
     }
 
     fn start_rename(&mut self) {
-        if let Some(d) = self.selected_device() {
-            self.mode = Mode::Renaming(TextInput::new(d.saved.name.clone()));
-        }
+        let current = match self.selected_row() {
+            Some(Row::Group(g)) => self.groups[g].name.clone(),
+            Some(Row::Device(i)) => self.devices[i].saved.name.clone(),
+            None => return,
+        };
+        self.mode = Mode::Renaming(TextInput::new(current));
     }
 
     async fn finish_rename(&mut self, name: String) -> Result<()> {
         if name.is_empty() {
             return Ok(());
         }
-        if let Some(d) = self
-            .selected
-            .selected()
-            .and_then(|i| self.devices.get_mut(i))
-        {
-            d.saved.name = name;
-            self.save().await?;
+        match self.selected_row() {
+            Some(Row::Group(g)) => self.groups[g].name = name,
+            Some(Row::Device(i)) => self.devices[i].saved.name = name,
+            None => return Ok(()),
         }
-        Ok(())
-    }
-
-    fn selected_device(&self) -> Option<&AppDevice> {
-        self.selected.selected().and_then(|i| self.devices.get(i))
+        self.save().await
     }
 
     async fn save(&self) -> Result<()> {
         let saved: Vec<SavedDevice> = self.devices.iter().map(|d| d.saved.clone()).collect();
-        store::save(&self.path, &saved, &self.favorites).await
+        store::save(&self.path, &saved, &self.groups, &self.favorites).await
     }
 }

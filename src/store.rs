@@ -12,9 +12,17 @@ pub struct SavedDevice {
     pub name: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SavedGroup {
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct SavedData {
     pub devices: Vec<SavedDevice>,
+    pub groups: Vec<SavedGroup>,
     pub favorites: Vec<Rgb>,
 }
 
@@ -24,6 +32,8 @@ struct SavedFile {
     favorites: Vec<String>,
     #[serde(default)]
     device: Vec<SavedDevice>,
+    #[serde(default)]
+    group: Vec<SavedGroup>,
 }
 
 /// `~/.config/rovee/devices.toml`
@@ -42,14 +52,21 @@ pub async fn load(path: &Path) -> Result<SavedData> {
     };
     Ok(SavedData {
         devices: file.device,
+        groups: file.group,
         favorites: file.favorites.iter().filter_map(|s| parse_hex(s)).collect(),
     })
 }
 
-pub async fn save(path: &Path, devices: &[SavedDevice], favorites: &[Rgb]) -> Result<()> {
+pub async fn save(
+    path: &Path,
+    devices: &[SavedDevice],
+    groups: &[SavedGroup],
+    favorites: &[Rgb],
+) -> Result<()> {
     let file = SavedFile {
         favorites: favorites.iter().map(|&c| to_hex(c)).collect(),
         device: devices.to_vec(),
+        group: groups.to_vec(),
     };
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;
