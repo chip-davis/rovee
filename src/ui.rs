@@ -14,6 +14,9 @@ use crate::input::TextInput;
 const RENAME_WIDTH: u16 = 40;
 const RENAME_HEIGHT: u16 = 3;
 
+const COLOR_WHEEL_WIDTH: u16 = 45;
+const COLOR_WHEEL_HEIGHT: u16 = 24;
+
 pub fn render(app: &mut App, frame: &mut Frame) {
     render_list(app, frame, frame.area());
 
@@ -77,6 +80,6 @@ fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn render_color_picker_wheel(rect_state: &mut RectState, frame: &mut Frame) {
-    let area = popup_area(frame.area(), 36, 24);
+    let area = popup_area(frame.area(), COLOR_WHEEL_WIDTH, COLOR_WHEEL_HEIGHT);
     frame.render_stateful_widget(ColorWheel::new(), area, rect_state);
 }

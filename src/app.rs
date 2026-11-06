@@ -2,10 +2,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::event::{self, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
 use govee::backend::GoveeBackend;
 use govee::backend::local::LocalBackend;
-use ratatui::{DefaultTerminal, widgets::ListState};
+use ratatui::{DefaultTerminal, layout::Position, style::Color as TuiColor, widgets::ListState};
 use tui_color_picker::RectState;
 
 use crate::devices::AppDevice;
@@ -58,11 +60,33 @@ impl App {
         while self.running {
             terminal.draw(|frame| ui::render(self, frame))?;
 
-            if let Some(key) = event::read()?.as_key_press_event() {
-                self.handle_key(key).await?;
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key).await?,
+                Event::Mouse(mouse) => self.handle_mouse(mouse).await?,
+                _ => {}
             }
         }
         Ok(())
+    }
+
+    async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        let Mode::ChangingColor(ref rect_state) = self.mode else {
+            return Ok(());
+        };
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return Ok(());
+        }
+
+        let click = Position::new(mouse.column, mouse.row);
+        if !rect_state.rect().contains(click) {
+            return Ok(());
+        }
+
+        let TuiColor::Rgb(r, g, b) = rect_state.color(mouse.column, mouse.row) else {
+            return Ok(());
+        };
+        self.set_selected_color(govee::types::Color::new(r, g, b))
+            .await
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -119,11 +143,15 @@ impl App {
 
     fn start_color_picker(&mut self) {
         if let Some(d) = self.selected_device() {
-            self.mode = Mode::ChangingColor(RectState::new(0.9, 0.9));
+            self.mode = Mode::ChangingColor(RectState::new_with_white(1.0));
         }
     }
 
-    fn finish_color_picker(&mut self) -> Result<()> {
+    async fn set_selected_color(&self, color: govee::types::Color) -> Result<()> {
+        let Some(live) = self.selected_device().and_then(|d| d.live.as_ref()) else {
+            return Ok(()); // offline: nothing to send
+        };
+        self.backend.set_color(&live.id, color).await?;
         Ok(())
     }
 

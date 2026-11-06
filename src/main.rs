@@ -11,7 +11,9 @@ async fn main() -> color_eyre::Result<()> {
     let mut app = app::App::new().await?;
 
     let mut terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     let result = app.run(&mut terminal).await;
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
 }
