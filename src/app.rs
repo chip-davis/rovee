@@ -2,10 +2,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::event::{self, KeyCode, KeyEvent};
+use crossterm::event::{self, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use govee::backend::GoveeBackend;
 use govee::backend::local::LocalBackend;
 use ratatui::{DefaultTerminal, widgets::ListState};
+use tui_color_picker::RectState;
 
 use crate::devices::AppDevice;
 use crate::input::TextInput;
@@ -15,7 +16,7 @@ use crate::ui;
 pub enum Mode {
     Normal,
     Renaming(TextInput),
-    ChangingColor,
+    ChangingColor(RectState),
 }
 
 pub struct App {
@@ -76,7 +77,7 @@ impl App {
                 _ => {}
             },
 
-            Mode::ChangingColor => match key.code {
+            Mode::ChangingColor(ref mut color) => match key.code {
                 KeyCode::Esc => self.mode = Mode::Normal,
                 _ => {}
             },
@@ -118,7 +119,7 @@ impl App {
 
     fn start_color_picker(&mut self) {
         if let Some(d) = self.selected_device() {
-            self.mode = Mode::ChangingColor;
+            self.mode = Mode::ChangingColor(RectState::new(0.9, 0.9));
         }
     }
 

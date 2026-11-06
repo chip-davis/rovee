@@ -21,8 +21,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         render_rename_popup(input, frame);
     }
 
-    if let Mode::ChangingColor = &app.mode {
-        render_color_picker_wheel(frame);
+    if let Mode::ChangingColor(rec_state) = &mut app.mode {
+        render_color_picker_wheel(rec_state, frame);
     }
 }
 
@@ -46,7 +46,7 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let hints = match app.mode {
         Mode::Normal => " rovee · ↑/↓ select · space toggle · c color · r rename · q quit ",
         Mode::Renaming(_) => " rovee ",
-        Mode::ChangingColor => " color ",
+        Mode::ChangingColor(_) => " color ",
     };
 
     let list = List::new(items)
@@ -76,11 +76,7 @@ fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
     area
 }
 
-fn render_color_picker_wheel(frame: &mut Frame) {
-    let mut rec_no_grad = RectState::new(0.9, 0.8);
-    frame.render_stateful_widget(
-        ColorWheel::new(),
-        Rect::new(35, 5, 12, 12),
-        &mut rec_no_grad,
-    );
+fn render_color_picker_wheel(rect_state: &mut RectState, frame: &mut Frame) {
+    let area = popup_area(frame.area(), 36, 24);
+    frame.render_stateful_widget(ColorWheel::new(), area, rect_state);
 }
