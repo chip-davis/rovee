@@ -49,6 +49,13 @@ pub enum Row {
     Device(usize),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Branch {
+    Top,
+    Mid,
+    Last,
+}
+
 pub struct GroupMenu {
     pub list: ListState,
     pub device: usize,
@@ -206,6 +213,9 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => self.selected.select_next(),
                 KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
                 KeyCode::Char(' ') => self.toggle_selected().await?,
+                KeyCode::Enter | KeyCode::Tab => self.set_collapsed(None).await?,
+                KeyCode::Left | KeyCode::Char('h') => self.set_collapsed(Some(true)).await?,
+                KeyCode::Right | KeyCode::Char('l') => self.set_collapsed(Some(false)).await?,
                 KeyCode::Char('g') => self.start_grouping(),
                 KeyCode::Char('d') => self.delete_selected_group().await?,
                 KeyCode::Char('r') => self.start_rename(),
@@ -304,11 +314,48 @@ impl App {
         Ok(())
     }
 
+    pub fn tree(&self) -> Vec<(Row, Branch)> {
+        let mut rows = Vec::new();
+        for g in 0..self.groups.len() {
+            rows.push((Row::Group(g), Branch::Top));
+            if !self.groups[g].collapsed {
+                let members = self.group_members(g);
+                let last = members.len().saturating_sub(1);
+                rows.extend(members.into_iter().enumerate().map(|(n, i)| {
+                    let branch = if n == last { Branch::Last } else { Branch::Mid };
+                    (Row::Device(i), branch)
+                }));
+            }
+        }
+        rows.extend(
+            (0..self.devices.len())
+                .filter(|&i| {
+                    !self
+                        .groups
+                        .iter()
+                        .any(|g| g.members.contains(&self.devices[i].saved.id))
+                })
+                .map(|i| (Row::Device(i), Branch::Top)),
+        );
+        rows
+    }
+
     pub fn rows(&self) -> Vec<Row> {
-        (0..self.groups.len())
-            .map(Row::Group)
-            .chain((0..self.devices.len()).map(Row::Device))
-            .collect()
+        self.tree().into_iter().map(|(row, _)| row).collect()
+    }
+
+    async fn set_collapsed(&mut self, collapsed: Option<bool>) -> Result<()> {
+        let Some(Row::Group(g)) = self.selected_row() else {
+            return Ok(());
+        };
+        let group = &mut self.groups[g];
+        let next = collapsed.unwrap_or(!group.collapsed);
+        if next == group.collapsed {
+            return Ok(());
+        }
+        group.collapsed = next;
+        self.select_row(Row::Group(g));
+        self.save().await
     }
 
     pub fn selected_row(&self) -> Option<Row> {
@@ -378,6 +425,7 @@ impl App {
             }
             None => members.push(id),
         }
+        self.select_row(Row::Device(device));
         self.save().await
     }
 
@@ -392,6 +440,7 @@ impl App {
             None => self.groups.push(SavedGroup {
                 name,
                 members: vec![id],
+                collapsed: false,
             }),
         }
         self.select_row(Row::Device(device));

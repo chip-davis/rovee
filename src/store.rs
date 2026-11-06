@@ -17,6 +17,8 @@ pub struct SavedGroup {
     pub name: String,
     #[serde(default)]
     pub members: Vec<String>,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Default)]

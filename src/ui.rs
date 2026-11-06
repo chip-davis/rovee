@@ -9,7 +9,8 @@ use ratatui::{
 use tui_color_picker::ColorWheel;
 
 use crate::app::{
-    App, ColorPicker, ColorTemp, GroupMenu, Mode, Row, kelvin_for_offset, offset_for_kelvin,
+    App, Branch, ColorPicker, ColorTemp, GroupMenu, Mode, Row, kelvin_for_offset,
+    offset_for_kelvin,
 };
 use crate::store::SavedGroup;
 use crate::devices::AppDevice;
@@ -208,14 +209,19 @@ fn device_dot(d: &AppDevice) -> Span<'static> {
 fn group_item(app: &App, g: usize) -> ListItem<'static> {
     let members = app.group_members(g);
     let on = members.iter().filter(|&&i| app.devices[i].on).count();
+    let collapsed = app.groups[g].collapsed;
+    let arrow = if collapsed { "▸" } else { "▾" };
     let title = Line::from(vec![
-        Span::raw("  "),
+        Span::raw(format!("{arrow} ")).fg(MUTED),
         Span::raw("▣").fg(rgb(PURPLE)),
         Span::raw("  "),
         Span::raw(app.groups[g].name.clone()).fg(rgb(PURPLE)).bold(),
     ]);
+    let stem = if collapsed || members.is_empty() { "  " } else { "│ " };
     let mut detail = vec![
-        Span::raw("     "),
+        Span::raw("  "),
+        Span::raw(stem).fg(DIM),
+        Span::raw("   "),
         Span::raw(format!("{} lights", members.len())).fg(DIM),
         Span::raw("  ·  ").fg(DIM),
     ];
@@ -225,23 +231,32 @@ fn group_item(app: &App, g: usize) -> ListItem<'static> {
         detail.extend(members.iter().map(|&i| device_dot(&app.devices[i])));
         detail.push(Span::raw(format!("  {on}/{} on", members.len())).fg(MUTED));
     }
-    ListItem::new(vec![title, Line::from(detail), Line::default()])
+    let gap = Line::from(vec![Span::raw("  "), Span::raw(stem).fg(DIM)]);
+    ListItem::new(vec![title, Line::from(detail), gap])
 }
 
-fn device_item(d: &AppDevice) -> ListItem<'static> {
+fn device_item(d: &AppDevice, branch: Branch) -> ListItem<'static> {
     let name_style = if d.online() {
         Style::new().fg(FG).bold()
     } else {
         Style::new().fg(DIM)
     };
+    let (twig, trunk) = match branch {
+        Branch::Mid => ("├─ ", "│  "),
+        Branch::Last => ("└─ ", "   "),
+        Branch::Top => ("   ", "   "),
+    };
     let title = Line::from(vec![
         Span::raw("  "),
+        Span::raw(twig).fg(DIM),
         device_dot(d),
         Span::raw("  "),
         Span::styled(d.saved.name.clone(), name_style),
     ]);
     let mut detail_spans = vec![
-        Span::raw("     "),
+        Span::raw("  "),
+        Span::raw(trunk).fg(DIM),
+        Span::raw("   "),
         Span::raw(d.saved.model.clone()).fg(DIM),
         Span::raw("  ·  ").fg(DIM),
         device_status(d),
@@ -253,16 +268,20 @@ fn device_item(d: &AppDevice) -> ListItem<'static> {
         detail_spans.push(Span::raw("  ·  ").fg(DIM));
         detail_spans.push(Span::raw(format!("{b}%")).fg(MUTED));
     }
-    ListItem::new(vec![title, Line::from(detail_spans), Line::default()])
+    let gap = match branch {
+        Branch::Mid => Line::from(vec![Span::raw("  "), Span::raw("│").fg(DIM)]),
+        _ => Line::default(),
+    };
+    ListItem::new(vec![title, Line::from(detail_spans), gap])
 }
 
 fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = app
-        .rows()
+        .tree()
         .into_iter()
-        .map(|row| match row {
+        .map(|(row, branch)| match row {
             Row::Group(g) => group_item(app, g),
-            Row::Device(i) => device_item(&app.devices[i]),
+            Row::Device(i) => device_item(&app.devices[i], branch),
         })
         .collect();
 
@@ -439,6 +458,7 @@ fn render_footer(mode: &Mode, frame: &mut Frame, area: Rect) {
             ("↑↓", "select"),
             ("space", "power"),
             ("+/-", "brightness"),
+            ("enter", "fold"),
             ("g", "group"),
             ("d", "delete group"),
             ("w", "wheel"),
