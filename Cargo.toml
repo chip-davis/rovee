@@ -1,8 +1,8 @@
 [package]
 name = "rovee"
 version = "0.1.0"
-description = "An example generated using the simple template"
-authors = ["chip"]
+description = "A TUI for controlling LAN Govee Lights using Rust."
+authors = ["chip-davis"]
 license = "MIT"
 edition = "2024"
 

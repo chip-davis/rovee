@@ -11,8 +11,8 @@ use tui_color_picker::ColorWheel;
 use govee::scene::SceneColor;
 
 use crate::app::{
-    App, Branch, ColorPicker, ColorTemp, Field, Focus, GroupMenu, Mode, Row, SceneEntry,
-    SceneMenu, kelvin_for_offset, offset_for_kelvin,
+    App, Branch, ColorPicker, ColorTemp, Field, Focus, GroupMenu, Mode, Row, SceneEntry, SceneMenu,
+    kelvin_for_offset, offset_for_kelvin,
 };
 use crate::devices::AppDevice;
 use crate::input::TextInput;
@@ -242,7 +242,11 @@ fn group_item(app: &App, g: usize) -> ListItem<'static> {
         Span::raw("  "),
         Span::raw(app.groups[g].name.clone()).fg(rgb(PURPLE)).bold(),
     ]);
-    let stem = if collapsed || members.is_empty() { "  " } else { "│ " };
+    let stem = if collapsed || members.is_empty() {
+        "  "
+    } else {
+        "│ "
+    };
     let mut detail = vec![
         Span::raw("  "),
         Span::raw(stem).fg(DIM),
@@ -352,7 +356,11 @@ fn build_card(app: &App) -> Option<Card> {
             };
             let info = |label: &str, value: Span<'static>| {
                 Line::from(vec![
-                    Span::raw(format!("  {label:<width$}", width = LABEL_WIDTH as usize - 2)).fg(DIM),
+                    Span::raw(format!(
+                        "  {label:<width$}",
+                        width = LABEL_WIDTH as usize - 2
+                    ))
+                    .fg(DIM),
                     value,
                 ])
             };
@@ -401,7 +409,10 @@ fn build_card(app: &App) -> Option<Card> {
             Some(Card {
                 title: app.groups[g].name.clone(),
                 accent: rgb(PURPLE),
-                colors: members.iter().map(|&i| device_rgb(&app.devices[i])).collect(),
+                colors: members
+                    .iter()
+                    .map(|&i| device_rgb(&app.devices[i]))
+                    .collect(),
                 power: Span::raw(format!("{on}/{} on", members.len())).fg(power_color),
                 mode,
                 brightness: members.first().and_then(|&i| app.devices[i].brightness),
@@ -430,14 +441,16 @@ fn render_card(app: &mut App, frame: &mut Frame, area: Rect) {
     let label = |text: &str, f: Field| -> Span<'static> {
         let width = LABEL_WIDTH as usize - 2;
         if focused && field == f {
-            Span::raw(format!("▸ {text:<width$}")).fg(rgb(ACCENT)).bold()
+            Span::raw(format!("▸ {text:<width$}"))
+                .fg(rgb(ACCENT))
+                .bold()
         } else {
             Span::raw(format!("  {text:<width$}")).fg(DIM)
         }
     };
     let split = |row: Rect| -> (Rect, Rect) {
-        let [l, r] = Layout::horizontal([Constraint::Length(LABEL_WIDTH), Constraint::Min(0)])
-            .areas(row);
+        let [l, r] =
+            Layout::horizontal([Constraint::Length(LABEL_WIDTH), Constraint::Min(0)]).areas(row);
         (l, r)
     };
 
@@ -451,7 +464,14 @@ fn render_card(app: &mut App, frame: &mut Frame, area: Rect) {
             Constraint::Min(0),
         ])
         .areas(inner);
-        render_name_row(app, &card, frame, name_row, label("name", Field::Name), focused);
+        render_name_row(
+            app,
+            &card,
+            frame,
+            name_row,
+            label("name", Field::Name),
+            focused,
+        );
         app.card_color_area = Rect::default();
         let last = app.last_color;
         if let Mode::ChangingColor(picker) = &mut app.mode {
@@ -486,7 +506,14 @@ fn render_card(app: &mut App, frame: &mut Frame, area: Rect) {
     ])
     .areas(inner);
 
-    render_name_row(app, &card, frame, name_row, label("name", Field::Name), focused);
+    render_name_row(
+        app,
+        &card,
+        frame,
+        name_row,
+        label("name", Field::Name),
+        focused,
+    );
 
     let (color_label, color_value) = split(color_area);
     if temp_open {
@@ -619,7 +646,13 @@ fn favorite_spans(favorites: &[Rgb], width: usize) -> Vec<Span<'static>> {
     favorites
         .iter()
         .enumerate()
-        .flat_map(|(i, &c)| [Span::raw(format!("{} ", i + 1)).fg(MUTED), swatch(c, width), Span::raw("  ")])
+        .flat_map(|(i, &c)| {
+            [
+                Span::raw(format!("{} ", i + 1)).fg(MUTED),
+                swatch(c, width),
+                Span::raw("  "),
+            ]
+        })
         .collect()
 }
 
@@ -656,7 +689,12 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
                 Field::Brightness => keys.push(("←→", "adjust")),
                 Field::Scene => keys.push(("enter", "scenes")),
             }
-            keys.extend([("p", "last"), ("1-9", "favorite"), ("tab", "list"), ("q", "quit")]);
+            keys.extend([
+                ("p", "last"),
+                ("1-9", "favorite"),
+                ("tab", "list"),
+                ("q", "quit"),
+            ]);
             keys
         }
         (Mode::Renaming(_), _) => vec![("enter", "save"), ("esc", "cancel")],
@@ -869,7 +907,10 @@ fn draw_wheel(
     frame.render_stateful_widget(ColorWheel::new(), wheel_area, &mut picker.wheel);
 
     let current = match last {
-        Some(c) => Line::from(vec![swatch(c, 6), Span::raw(format!("  {}", to_hex(c))).fg(FG)]),
+        Some(c) => Line::from(vec![
+            swatch(c, 6),
+            Span::raw(format!("  {}", to_hex(c))).fg(FG),
+        ]),
         None => Line::from("click the wheel to pick a color").fg(DIM),
     };
     frame.render_widget(Paragraph::new(current.centered()), swatch_row);
