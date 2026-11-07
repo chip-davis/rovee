@@ -27,7 +27,29 @@ A terminal app for controlling Govee lights over your local network, built with 
 
   Replace `192.168.1.0/24` with your own network.
 
+## Install
+
+With [cargo-binstall] (downloads a prebuilt binary):
+
+```sh
+cargo binstall rovee
+```
+
+Or build from source with Cargo:
+
+```sh
+cargo install rovee
+```
+
+Prebuilt binaries and one-line installers for Linux, macOS and Windows are also on the [releases page](https://github.com/chip-davis/rovee/releases).
+
 ## Running
+
+```sh
+rovee
+```
+
+Or from a checkout of this repository:
 
 ```sh
 cargo run --release
@@ -79,4 +101,5 @@ This project is licensed under the MIT license ([LICENSE] or <http://opensource.
 [Ratatui]: https://ratatui.rs
 [govee]: https://crates.io/crates/govee
 [VHS]: https://github.com/charmbracelet/vhs
+[cargo-binstall]: https://github.com/cargo-bins/cargo-binstall
 [LICENSE]: ./LICENSE

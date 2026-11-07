@@ -5,6 +5,12 @@ description = "A TUI for controlling LAN Govee Lights using Rust."
 authors = ["chip-davis"]
 license = "MIT"
 edition = "2024"
+repository = "https://github.com/chip-davis/rovee"
+homepage = "https://github.com/chip-davis/rovee"
+readme = "README.md"
+keywords = ["govee", "tui", "ratatui", "lights", "smart-home"]
+categories = ["command-line-utilities"]
+exclude = ["assets/", "demo.tape", "examples/", ".github/"]
 
 [dependencies]
 crossterm = "0.29.0"
@@ -22,3 +28,8 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
