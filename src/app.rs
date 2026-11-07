@@ -278,7 +278,8 @@ impl App {
             Mode::ChangingTemp(ref mut temp) => {
                 let pressed = matches!(
                     mouse.kind,
-                    MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+                    MouseEventKind::Down(MouseButton::Left)
+                        | MouseEventKind::Drag(MouseButton::Left)
                 );
                 if !pressed {
                     return Ok(());
